@@ -60,7 +60,7 @@ interface CachedFormatInfo {
 const downloads = reactive<DownloadItem[]>([]);
 
 const settings = reactive<AppSettings>({
-  useCookies: true,
+  useCookies: false,
   cookieBrowser: 'chrome',
   outputDir: '',
   defaultFormat: 'bestvideo+bestaudio',

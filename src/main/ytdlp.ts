@@ -44,6 +44,7 @@ export interface DownloadOptions {
   cookieBrowser: string;
   mergeFormat?: string;
   rateLimit?: string;
+  _dropCookiesForRetry?: boolean;
 }
 
 export interface CookieOptions {
@@ -130,6 +131,9 @@ export async function fetchQuickInfo(
       args.push('--cookies-from-browser', cookies.cookieBrowser);
     }
 
+    // Bypass SABR limitation to get 4K formats
+    args.push('--extractor-args', 'youtube:player_client=default');
+
     args.push('--skip-download', '--no-playlist', '--print', '%(title)s\n%(thumbnail)s', url);
 
     const childProcess = spawn(ytdlpPath, args);
@@ -163,66 +167,84 @@ export async function fetchQuickInfo(
 export async function listFormats(url: string, cookies?: CookieOptions): Promise<VideoInfo> {
   const ytdlpPath = await getYtdlpPath();
 
-  return new Promise((resolve, reject) => {
-    const args: string[] = [];
+  const runWithCookies = async (useAuth: boolean): Promise<VideoInfo> => {
+    return new Promise((resolve, reject) => {
+      const args: string[] = [];
 
-    if (cookies?.useCookies) {
-      args.push('--cookies-from-browser', cookies.cookieBrowser);
+      if (useAuth && cookies?.useCookies) {
+        args.push('--cookies-from-browser', cookies.cookieBrowser);
+      }
+
+      // Bypass SABR limitation to get 4K formats (works best when no cookies are used)
+      args.push('--extractor-args', 'youtube:player_client=default');
+
+      args.push('-j', '--no-playlist', url);
+
+      const childProcess = spawn(ytdlpPath, args);
+
+      let stdoutBuffer = '';
+      let stderrBuffer = '';
+
+      childProcess.stdout.on('data', (chunk) => {
+        stdoutBuffer += chunk.toString();
+      });
+
+      childProcess.stderr.on('data', (chunk) => {
+        stderrBuffer += chunk.toString();
+      });
+
+      childProcess.on('close', (exitCode) => {
+        if (exitCode !== 0) {
+          reject(new Error(stderrBuffer || `yt-dlp exited with code ${exitCode}`));
+          return;
+        }
+
+        try {
+          const rawData = JSON.parse(stdoutBuffer);
+
+          const videoInfo: VideoInfo = {
+            id: rawData.id,
+            title: rawData.title || 'Unknown',
+            thumbnail: rawData.thumbnail || '',
+            duration: rawData.duration || 0,
+            url,
+            formats: (rawData.formats || []).map(
+              (f: Record<string, unknown>): FormatInfo => ({
+                format_id: String(f.format_id || ''),
+                ext: String(f.ext || ''),
+                resolution: String(f.resolution || 'audio only'),
+                height: (f.height as number) || null,
+                fps: (f.fps as number) || null,
+                filesize: (f.filesize as number) || null,
+                filesize_approx: (f.filesize_approx as number) || null,
+                vcodec: String(f.vcodec || 'none'),
+                acodec: String(f.acodec || 'none'),
+                tbr: (f.tbr as number) || null,
+                format_note: String(f.format_note || '')
+              })
+            )
+          };
+
+          resolve(videoInfo);
+        } catch (parseError) {
+          reject(new Error(`Failed to parse yt-dlp output: ${parseError}`));
+        }
+      });
+    });
+  };
+
+  try {
+    // 1st attempt: ALWAYS without cookies. YouTube's anti-bot (SABR) restricts 4K/DASH
+    // formats on active logged-in sessions. Dropping cookies avoids this restriction.
+    return await runWithCookies(false);
+  } catch (err: any) {
+    // If it failed AND the user has cookies enabled, it might be an age-restricted
+    // or private video. Try again WITH cookies as a fallback.
+    if (cookies?.useCookies && (err.message.includes('Sign in') || err.message.includes('reloaded') || err.message.includes('Private video') || err.message.includes('Bot'))) {
+      return await runWithCookies(true);
     }
-
-    args.push('-j', '--no-playlist', url);
-
-    const childProcess = spawn(ytdlpPath, args);
-
-    let stdoutBuffer = '';
-    let stderrBuffer = '';
-
-    childProcess.stdout.on('data', (chunk) => {
-      stdoutBuffer += chunk.toString();
-    });
-
-    childProcess.stderr.on('data', (chunk) => {
-      stderrBuffer += chunk.toString();
-    });
-
-    childProcess.on('close', (exitCode) => {
-      if (exitCode !== 0) {
-        reject(new Error(stderrBuffer || `yt-dlp exited with code ${exitCode}`));
-        return;
-      }
-
-      try {
-        const rawData = JSON.parse(stdoutBuffer);
-
-        const videoInfo: VideoInfo = {
-          id: rawData.id,
-          title: rawData.title || 'Unknown',
-          thumbnail: rawData.thumbnail || '',
-          duration: rawData.duration || 0,
-          url,
-          formats: (rawData.formats || []).map(
-            (f: Record<string, unknown>): FormatInfo => ({
-              format_id: String(f.format_id || ''),
-              ext: String(f.ext || ''),
-              resolution: String(f.resolution || 'audio only'),
-              height: (f.height as number) || null,
-              fps: (f.fps as number) || null,
-              filesize: (f.filesize as number) || null,
-              filesize_approx: (f.filesize_approx as number) || null,
-              vcodec: String(f.vcodec || 'none'),
-              acodec: String(f.acodec || 'none'),
-              tbr: (f.tbr as number) || null,
-              format_note: String(f.format_note || '')
-            })
-          )
-        };
-
-        resolve(videoInfo);
-      } catch (parseError) {
-        reject(new Error(`Failed to parse yt-dlp output: ${parseError}`));
-      }
-    });
-  });
+    throw err;
+  }
 }
 
 // ── Fila de downloads ──
@@ -282,9 +304,12 @@ async function executeDownload(
   const args: string[] = [];
 
   // Cookies
-  if (options.useCookies) {
+  if (options.useCookies && !options._dropCookiesForRetry) {
     args.push('--cookies-from-browser', options.cookieBrowser);
   }
+
+  // Bypass SABR limitation to get 4K formats
+  args.push('--extractor-args', 'youtube:player_client=default');
 
   // Formato
   const format = options.formatId || 'bestvideo+bestaudio';
@@ -438,6 +463,12 @@ async function executeDownload(
         // Na segunda falha (retryCount >= 1), limpa arquivos parciais
         if (nextRetry >= 2) {
           cleanPartialFiles(options.outputDir);
+        }
+
+        // Se o YouTube bloqueou formato 4K/DASH por causa de cookies (SABR), log de erro avisa.
+        // O próximo retry deve tentar remover os cookies!
+        if (options.useCookies && !options._dropCookiesForRetry && stderrAccum.includes('Requested format is not available')) {
+          options._dropCookiesForRetry = true;
         }
 
         // Re-enfileira com retry
