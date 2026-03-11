@@ -2,183 +2,197 @@
  * Wrapper do yt-dlp para o processo main do Electron.
  *
  * Responsável por:
- * - Listar formatos disponíveis de um vídeo (`yt-dlp -j`)
- * - Iniciar downloads com parsing de progresso em tempo real
- * - Cancelar downloads em andamento
- *
- * Comunica-se com o renderer via IPC (webContents.send), enviando eventos de
- * progresso, erro e conclusão conforme o yt-dlp escreve na stdout/stderr.
+ * - Listar formatos disponíveis (`yt-dlp -j`)
+ * - Gerenciar fila de downloads com limite de concorrência
+ * - Detectar e emitir etapas do download (analisando, vídeo, áudio, merge)
+ * - Auto-retry inteligente (continuar → limpar → recomeçar)
+ * - Limitar velocidade de download (--limit-rate)
  */
 
-import { spawn, ChildProcess } from 'child_process'
-import { BrowserWindow, Notification } from 'electron'
-import { checkDep } from './deps'
+import { spawn, ChildProcess } from 'child_process';
+import { BrowserWindow, Notification } from 'electron';
+import { existsSync, readdirSync, unlinkSync } from 'fs';
+import { join } from 'path';
+import { checkDep } from './deps';
+
+// ── Processos e fila ──
 
 /** Mapa de processos ativos — permite cancelar downloads pelo ID */
-const activeProcesses = new Map<string, ChildProcess>()
+const activeProcesses = new Map<string, ChildProcess>();
+
+/** Fila de downloads pendentes aguardando slot */
+const downloadQueue: Array<{
+  options: DownloadOptions;
+  mainWindow: BrowserWindow;
+  retryCount: number;
+}> = [];
+
+/** Contador de downloads rodando agora */
+let runningCount = 0;
+
+/** Limite padrão de downloads simultâneos */
+let maxConcurrent = 3;
 
 // ── Interfaces ──
 
-/** Opções para iniciar um download */
 export interface DownloadOptions {
-  id: string
-  url: string
-  outputDir: string
-  formatId?: string
-  useCookies: boolean
-  cookieBrowser: string
-  mergeFormat?: string
+  id: string;
+  url: string;
+  outputDir: string;
+  formatId?: string;
+  useCookies: boolean;
+  cookieBrowser: string;
+  mergeFormat?: string;
+  rateLimit?: string;
 }
 
-/** Opções de cookies para listagem de formatos */
 export interface CookieOptions {
-  useCookies: boolean
-  cookieBrowser: string
+  useCookies: boolean;
+  cookieBrowser: string;
 }
 
-/** Informações de um formato disponível */
 export interface FormatInfo {
-  format_id: string
-  ext: string
-  resolution: string
-  height: number | null
-  fps: number | null
-  filesize: number | null
-  filesize_approx: number | null
-  vcodec: string
-  acodec: string
-  tbr: number | null
-  format_note: string
+  format_id: string;
+  ext: string;
+  resolution: string;
+  height: number | null;
+  fps: number | null;
+  filesize: number | null;
+  filesize_approx: number | null;
+  vcodec: string;
+  acodec: string;
+  tbr: number | null;
+  format_note: string;
 }
 
-/** Informações de um vídeo retornadas pelo yt-dlp */
 export interface VideoInfo {
-  id: string
-  title: string
-  thumbnail: string
-  duration: number
-  formats: FormatInfo[]
-  url: string
+  id: string;
+  title: string;
+  thumbnail: string;
+  duration: number;
+  formats: FormatInfo[];
+  url: string;
 }
 
-/**
- * Obtém o caminho absoluto do binário yt-dlp.
- *
- * @returns Caminho do yt-dlp
- * @throws Error se o yt-dlp não estiver instalado
- */
-async function getYtdlpPath(): Promise<string> {
-  const status = await checkDep('yt-dlp')
-  if (!status.path) {
-    throw new Error('yt-dlp not installed')
-  }
-  return status.path
-}
-
-/** Informações rápidas de um vídeo (apenas título e thumbnail) */
 export interface QuickVideoInfo {
-  title: string
-  thumbnail: string
+  title: string;
+  thumbnail: string;
+}
+
+// ── Etapas do download ──
+export type DownloadStage =
+  | 'queued'
+  | 'analyzing'
+  | 'downloading_video'
+  | 'downloading_audio'
+  | 'merging'
+  | 'complete';
+
+// ── Funções internas ──
+
+async function getYtdlpPath(): Promise<string> {
+  const status = await checkDep('yt-dlp');
+  if (!status.path) {
+    throw new Error('yt-dlp not installed');
+  }
+  return status.path;
 }
 
 /**
- * Busca título e thumbnail de um vídeo de forma rápida.
- * Usa --skip-download e --print para extrair apenas os metadados sem baixar nada.
- * Aceita cookies opcionais para vídeos com restrição de acesso.
+ * Define o limite máximo de downloads simultâneos.
  *
- * @param url - URL do vídeo
- * @param cookies - Configurações de cookies opcionais
- * @returns Título e thumbnail do vídeo
+ * @param max - Número máximo (1-10)
  */
+export function setMaxConcurrent(max: number): void {
+  maxConcurrent = Math.min(10, Math.max(1, max));
+  processQueue();
+}
+
+/**
+ * Retorna o limite atual de downloads simultâneos.
+ */
+export function getMaxConcurrent(): number {
+  return maxConcurrent;
+}
+
+// ── Busca rápida ──
+
 export async function fetchQuickInfo(
   url: string,
   cookies?: CookieOptions
 ): Promise<QuickVideoInfo> {
-  const ytdlpPath = await getYtdlpPath()
+  const ytdlpPath = await getYtdlpPath();
 
   return new Promise((resolve) => {
-    const args: string[] = []
+    const args: string[] = [];
 
     if (cookies?.useCookies) {
-      args.push('--cookies-from-browser', cookies.cookieBrowser)
+      args.push('--cookies-from-browser', cookies.cookieBrowser);
     }
 
-    // Usa --print para pegar só título e thumbnail sem baixar o vídeo
-    args.push('--skip-download', '--no-playlist', '--print', '%(title)s\n%(thumbnail)s', url)
+    args.push('--skip-download', '--no-playlist', '--print', '%(title)s\n%(thumbnail)s', url);
 
-    const childProcess = spawn(ytdlpPath, args)
-    let stdoutBuffer = ''
+    const childProcess = spawn(ytdlpPath, args);
+    let stdoutBuffer = '';
 
     childProcess.stdout.on('data', (chunk) => {
-      stdoutBuffer += chunk.toString()
-    })
+      stdoutBuffer += chunk.toString();
+    });
 
     childProcess.on('close', (exitCode) => {
       if (exitCode !== 0) {
-        // Se falhar, retorna valores padrão sem lançar erro
-        resolve({ title: '', thumbnail: '' })
-        return
+        resolve({ title: '', thumbnail: '' });
+        return;
       }
 
-      const lines = stdoutBuffer.trim().split('\n')
+      const lines = stdoutBuffer.trim().split('\n');
       resolve({
         title: lines[0] || '',
         thumbnail: lines[1] || ''
-      })
-    })
+      });
+    });
 
     childProcess.on('error', () => {
-      resolve({ title: '', thumbnail: '' })
-    })
-  })
+      resolve({ title: '', thumbnail: '' });
+    });
+  });
 }
 
-/**
- * Lista os formatos disponíveis de um vídeo usando `yt-dlp -j`.
- * O flag `-j` retorna todas as informações do vídeo em formato JSON,
- * incluindo a lista de formatos com resolução, codec, tamanho etc.
- *
- * Importante: passa cookies quando disponível, pois o YouTube exige autenticação
- * para listar formatos 4K (2160p) e premium (AV1, VP9 de alta qualidade).
- *
- * @param url - URL do vídeo do YouTube
- * @param cookies - Configurações de cookies opcionais
- * @returns Objeto com informações do vídeo e lista de formatos
- */
+// ── Listagem de formatos ──
+
 export async function listFormats(url: string, cookies?: CookieOptions): Promise<VideoInfo> {
-  const ytdlpPath = await getYtdlpPath()
+  const ytdlpPath = await getYtdlpPath();
 
   return new Promise((resolve, reject) => {
-    const args: string[] = []
+    const args: string[] = [];
 
-    // Passa cookies para que o YouTube libere formatos 4K e premium
     if (cookies?.useCookies) {
-      args.push('--cookies-from-browser', cookies.cookieBrowser)
+      args.push('--cookies-from-browser', cookies.cookieBrowser);
     }
 
-    args.push('-j', '--no-playlist', url)
+    args.push('-j', '--no-playlist', url);
 
-    const childProcess = spawn(ytdlpPath, args)
+    const childProcess = spawn(ytdlpPath, args);
 
-    let stdoutBuffer = ''
-    let stderrBuffer = ''
+    let stdoutBuffer = '';
+    let stderrBuffer = '';
 
     childProcess.stdout.on('data', (chunk) => {
-      stdoutBuffer += chunk.toString()
-    })
+      stdoutBuffer += chunk.toString();
+    });
 
     childProcess.stderr.on('data', (chunk) => {
-      stderrBuffer += chunk.toString()
-    })
+      stderrBuffer += chunk.toString();
+    });
 
     childProcess.on('close', (exitCode) => {
       if (exitCode !== 0) {
-        reject(new Error(stderrBuffer || `yt-dlp exited with code ${exitCode}`))
-        return
+        reject(new Error(stderrBuffer || `yt-dlp exited with code ${exitCode}`));
+        return;
       }
 
       try {
-        const rawData = JSON.parse(stdoutBuffer)
+        const rawData = JSON.parse(stdoutBuffer);
 
         const videoInfo: VideoInfo = {
           id: rawData.id,
@@ -201,141 +215,310 @@ export async function listFormats(url: string, cookies?: CookieOptions): Promise
               format_note: String(f.format_note || '')
             })
           )
-        }
+        };
 
-        resolve(videoInfo)
+        resolve(videoInfo);
       } catch (parseError) {
-        reject(new Error(`Failed to parse yt-dlp output: ${parseError}`))
+        reject(new Error(`Failed to parse yt-dlp output: ${parseError}`));
       }
-    })
-  })
+    });
+  });
+}
+
+// ── Fila de downloads ──
+
+/**
+ * Processa a fila: inicia downloads pendentes se houver slots disponíveis.
+ */
+function processQueue(): void {
+  while (runningCount < maxConcurrent && downloadQueue.length > 0) {
+    const next = downloadQueue.shift();
+    if (next) {
+      executeDownload(next.options, next.mainWindow, next.retryCount);
+    }
+  }
 }
 
 /**
- * Inicia o download de um vídeo e envia eventos de progresso em tempo real para o renderer.
+ * Entrada pública para iniciar um download.
+ * Se o limite de concorrência foi atingido, o download entra na fila.
  *
- * Monta a linha de comando do yt-dlp com as opções fornecidas e parseia a stdout
- * para extrair porcentagem, velocidade e tempo estimado. Usa o flag `--newline`
- * para que cada atualização de progresso venha em uma nova linha, facilitando o parsing.
- *
- * @param options - Configurações do download (URL, formato, cookies, diretório de saída)
- * @param mainWindow - Janela principal para enviar eventos IPC
+ * @param options - Opções do download
+ * @param mainWindow - Janela principal do Electron
  */
 export async function startDownload(
   options: DownloadOptions,
   mainWindow: BrowserWindow
 ): Promise<void> {
-  const ytdlpPath = await getYtdlpPath()
-
-  // Monta os argumentos do yt-dlp
-  const args: string[] = []
-
-  // Cookies do navegador (se habilitado)
-  if (options.useCookies) {
-    args.push('--cookies-from-browser', options.cookieBrowser)
+  if (runningCount >= maxConcurrent) {
+    // Coloca na fila e avisa o renderer
+    downloadQueue.push({ options, mainWindow, retryCount: 0 });
+    mainWindow.webContents.send('download:stage', {
+      id: options.id,
+      stage: 'queued' as DownloadStage
+    });
+    return;
   }
 
-  // Formato de vídeo/áudio
-  const format = options.formatId || 'bestvideo+bestaudio'
-  args.push('-f', format)
+  executeDownload(options, mainWindow, 0);
+}
 
-  // Formato de saída após merge de vídeo+áudio
-  args.push('--merge-output-format', options.mergeFormat || 'mkv')
+/**
+ * Executa o download de fato (chamado pela fila ou diretamente).
+ * Faz parsing de stages (etapas), progresso, e gerencia auto-retry.
+ *
+ * @param options - Opções do download
+ * @param mainWindow - Janela principal
+ * @param retryCount - Número de tentativas já feitas
+ */
+async function executeDownload(
+  options: DownloadOptions,
+  mainWindow: BrowserWindow,
+  retryCount: number
+): Promise<void> {
+  runningCount++;
 
-  // Template do caminho de saída
-  args.push('-o', `${options.outputDir}/%(title)s.%(ext)s`)
+  const ytdlpPath = await getYtdlpPath();
+  const args: string[] = [];
 
-  // Modo newline: cada atualização de progresso fica em uma linha separada
-  args.push('--newline')
+  // Cookies
+  if (options.useCookies) {
+    args.push('--cookies-from-browser', options.cookieBrowser);
+  }
 
-  // Template de progresso customizado para facilitar o parsing
+  // Formato
+  const format = options.formatId || 'bestvideo+bestaudio';
+  args.push('-f', format);
+
+  // Merge format
+  args.push('--merge-output-format', options.mergeFormat || 'mkv');
+
+  // Rate limit
+  if (options.rateLimit && options.rateLimit !== '0') {
+    args.push('--limit-rate', options.rateLimit);
+  }
+
+  // Output path
+  args.push('-o', `${options.outputDir}/%(title)s.%(ext)s`);
+
+  // Progresso por linha
+  args.push('--newline');
+
+  // Template de progresso
   args.push(
     '--progress-template',
     'download:%(progress._percent_str)s %(progress._speed_str)s %(progress._eta_str)s'
-  )
+  );
 
-  args.push(options.url)
+  // Retries nativos do yt-dlp
+  args.push('--retries', '3', '--fragment-retries', '3');
 
-  const childProcess = spawn(ytdlpPath, args)
-  activeProcesses.set(options.id, childProcess)
+  // Se é retry, tenta continuar o download anterior
+  if (retryCount > 0) {
+    args.push('-c');
+    mainWindow.webContents.send('download:retry', {
+      id: options.id,
+      retryCount
+    });
+  }
 
-  // Regex para parsear linhas de progresso no formato: "  45.2% 12.3MiB/s 00:32"
-  const progressRegex = /^\s*([\d.]+)%\s+(.+?)\s+(\S+)\s*$/
+  args.push(options.url);
+
+  // Emite stage: analisando
+  mainWindow.webContents.send('download:stage', {
+    id: options.id,
+    stage: 'analyzing' as DownloadStage
+  });
+
+  const childProcess = spawn(ytdlpPath, args);
+  activeProcesses.set(options.id, childProcess);
+
+  // Regex para progresso
+  const progressRegex = /^\s*([\d.]+)%\s+(.+?)\s+(\S+)\s*$/;
+
+  // Rastreia quantos blocos de download já passaram (vídeo = 1, áudio = 2)
+  let downloadPhaseCount = 0;
+  let currentStage: DownloadStage = 'analyzing';
 
   childProcess.stdout.on('data', (data) => {
-    const lines = data.toString().split('\n')
+    const lines = data.toString().split('\n');
 
     for (const line of lines) {
-      const trimmedLine = line.trim()
-      if (!trimmedLine) continue
+      const trimmedLine = line.trim();
+      if (!trimmedLine) {
+        continue;
+      }
 
-      const match = trimmedLine.match(progressRegex)
+      // Detecta mudança de stage pela saída do yt-dlp
+      if (trimmedLine.startsWith('[download]') && !trimmedLine.includes('%')) {
+        // Início de um novo bloco de download
+        downloadPhaseCount++;
+        const newStage: DownloadStage = downloadPhaseCount <= 1
+          ? 'downloading_video'
+          : 'downloading_audio';
+
+        if (newStage !== currentStage) {
+          currentStage = newStage;
+          mainWindow.webContents.send('download:stage', {
+            id: options.id,
+            stage: currentStage
+          });
+        }
+      }
+
+      // Detecta merge
+      if (
+        trimmedLine.startsWith('[Merger]') ||
+        trimmedLine.startsWith('[ffmpeg]') ||
+        trimmedLine.includes('Merging formats')
+      ) {
+        if (currentStage !== 'merging') {
+          currentStage = 'merging';
+          mainWindow.webContents.send('download:stage', {
+            id: options.id,
+            stage: 'merging'
+          });
+        }
+      }
+
+      // Progresso numérico
+      const match = trimmedLine.match(progressRegex);
       if (match) {
+        // Detecta primeiro envio de progresso → stage de download
+        if (currentStage === 'analyzing') {
+          currentStage = 'downloading_video';
+          mainWindow.webContents.send('download:stage', {
+            id: options.id,
+            stage: currentStage
+          });
+        }
+
         mainWindow.webContents.send('download:progress', {
           id: options.id,
           percent: parseFloat(match[1]),
           speed: match[2],
           eta: match[3]
-        })
+        });
       }
     }
-  })
+  });
+
+  // Coleta stderr para exibir erros
+  let stderrAccum = '';
 
   childProcess.stderr.on('data', (data) => {
-    const errorText = data.toString().trim()
-    if (errorText) {
-      mainWindow.webContents.send('download:error', {
-        id: options.id,
-        error: errorText
-      })
-    }
-  })
+    stderrAccum += data.toString();
+  });
 
   childProcess.on('close', (exitCode) => {
-    activeProcesses.delete(options.id)
+    activeProcesses.delete(options.id);
+    runningCount--;
 
     if (exitCode === 0) {
-      // Download concluído com sucesso — notifica renderer e mostra notificação nativa
-      mainWindow.webContents.send('download:complete', { id: options.id })
+      // Sucesso
+      mainWindow.webContents.send('download:stage', {
+        id: options.id,
+        stage: 'complete' as DownloadStage
+      });
+      mainWindow.webContents.send('download:complete', { id: options.id });
 
       const notification = new Notification({
         title: 'Download Complete',
         body: 'Download finished successfully!',
         silent: false
-      })
-      notification.show()
+      });
+      notification.show();
     } else {
-      mainWindow.webContents.send('download:error', {
-        id: options.id,
-        error: `yt-dlp exited with code ${exitCode}`
-      })
+      // Falha — tenta auto-retry (máx 3 tentativas)
+      const maxRetries = 3;
+
+      if (retryCount < maxRetries) {
+        const nextRetry = retryCount + 1;
+
+        // Na segunda falha (retryCount >= 1), limpa arquivos parciais
+        if (nextRetry >= 2) {
+          cleanPartialFiles(options.outputDir);
+        }
+
+        // Re-enfileira com retry
+        downloadQueue.unshift({ options, mainWindow, retryCount: nextRetry });
+      } else {
+        // Esgotou tentativas — reporta erro
+        const errorText = stderrAccum.trim() || `yt-dlp exited with code ${exitCode}`;
+        mainWindow.webContents.send('download:error', {
+          id: options.id,
+          error: errorText
+        });
+      }
     }
-  })
+
+    // Processa próximo da fila
+    processQueue();
+  });
 
   childProcess.on('error', (err) => {
-    activeProcesses.delete(options.id)
+    activeProcesses.delete(options.id);
+    runningCount--;
+
     mainWindow.webContents.send('download:error', {
       id: options.id,
       error: err.message
-    })
-  })
+    });
+
+    processQueue();
+  });
+}
+
+/**
+ * Remove arquivos parciais (.part, .ytdl) do diretório.
+ * Chamado antes de uma nova tentativa limpa.
+ *
+ * @param dir - Diretório de saída
+ */
+function cleanPartialFiles(dir: string): void {
+  try {
+    if (!existsSync(dir)) {
+      return;
+    }
+
+    const files = readdirSync(dir);
+    for (const file of files) {
+      if (file.endsWith('.part') || file.endsWith('.ytdl')) {
+        try {
+          unlinkSync(join(dir, file));
+        } catch {
+          // ignora erros ao deletar
+        }
+      }
+    }
+  } catch {
+    // ignora
+  }
 }
 
 /**
  * Cancela um download em andamento.
- * Envia SIGTERM para o processo filho do yt-dlp.
  *
  * @param id - ID do download a cancelar
- * @returns true se o processo foi encontrado e cancelado, false se não existia
+ * @returns true se o processo foi cancelado
  */
 export function cancelDownload(id: string): boolean {
-  const childProcess = activeProcesses.get(id)
-
-  if (childProcess) {
-    childProcess.kill('SIGTERM')
-    activeProcesses.delete(id)
-    return true
+  // Remove da fila se ainda não começou
+  const queueIndex = downloadQueue.findIndex((item) => item.options.id === id);
+  if (queueIndex !== -1) {
+    downloadQueue.splice(queueIndex, 1);
+    return true;
   }
 
-  return false
+  // Mata o processo se já está ativo
+  const childProcess = activeProcesses.get(id);
+  if (childProcess) {
+    childProcess.kill('SIGTERM');
+    activeProcesses.delete(id);
+    runningCount--;
+    processQueue();
+    return true;
+  }
+
+  return false;
 }

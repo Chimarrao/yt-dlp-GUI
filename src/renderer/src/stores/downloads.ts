@@ -1,86 +1,119 @@
 /**
  * Store reativo de downloads e configurações do app.
  *
- * Gerencia a fila de downloads (adicionar, atualizar progresso, erro, concluir, remover),
- * as configurações globais (cookies, diretório de saída, formato padrão),
- * e o cache de formatos pré-carregados.
- *
- * Usa `reactive` e `ref` do Vue para que todos os componentes reajam às mudanças automaticamente.
+ * Gerencia a fila de downloads, configurações globais,
+ * cache de formatos, e persistência em disco via IPC.
  */
 
-import { reactive, ref } from 'vue'
-import { DownloadStatus } from '../../../shared/constants'
+import { reactive, ref, watch } from 'vue';
+import { DownloadStatus } from '../../../shared/constants';
 
-// Re-exporta o enum para os componentes usarem
-export { DownloadStatus }
+export { DownloadStatus };
+
+// ── Tipos das etapas de download ──
+export type DownloadStage =
+  | 'queued'
+  | 'analyzing'
+  | 'downloading_video'
+  | 'downloading_audio'
+  | 'merging'
+  | 'complete';
 
 /** Representa um item na fila de downloads */
 export interface DownloadItem {
-  id: string
-  url: string
-  title: string
-  thumbnail: string
-  loadingTitle: boolean
-  status: DownloadStatus
-  percent: number
-  speed: string
-  eta: string
-  error: string
-  formatId: string
+  id: string;
+  url: string;
+  title: string;
+  thumbnail: string;
+  loadingTitle: boolean;
+  status: DownloadStatus;
+  stage: DownloadStage;
+  percent: number;
+  speed: string;
+  eta: string;
+  error: string;
+  formatId: string;
+  retryCount: number;
+  isRetrying: boolean;
 }
 
 /** Configurações globais do app */
 export interface AppSettings {
-  useCookies: boolean
-  cookieBrowser: string
-  outputDir: string
-  defaultFormat: string
-  mergeFormat: string
+  useCookies: boolean;
+  cookieBrowser: string;
+  outputDir: string;
+  defaultFormat: string;
+  mergeFormat: string;
+  maxConcurrentDownloads: number;
+  rateLimit: string;
 }
 
-/** Informações de formato em cache */
+/** Cache de formatos já consultados */
 interface CachedFormatInfo {
-  title: string
-  formats: unknown[]
-  timestamp: number
+  title: string;
+  formats: unknown[];
+  timestamp: number;
 }
 
 // ── Estado global (singleton) ──
 
-const downloads = reactive<DownloadItem[]>([])
+const downloads = reactive<DownloadItem[]>([]);
 
 const settings = reactive<AppSettings>({
   useCookies: true,
   cookieBrowser: 'chrome',
   outputDir: '',
   defaultFormat: 'bestvideo+bestaudio',
-  mergeFormat: 'mkv'
-})
+  mergeFormat: 'mkv',
+  maxConcurrentDownloads: 3,
+  rateLimit: '0'
+});
 
-const currentView = ref<'downloads' | 'settings'>('downloads')
+const currentView = ref<'downloads' | 'settings'>('downloads');
 
-/**
- * Cache de formatos já consultados.
- * Chave: URL do vídeo → Valor: dados de formatos + timestamp.
- * Evita re-consultar o yt-dlp quando o usuário abre o seletor de formatos.
- */
-const formatCache = reactive<Record<string, CachedFormatInfo>>({})
+const formatCache = reactive<Record<string, CachedFormatInfo>>({});
 
-/** Contador incremental para gerar IDs únicos de download */
-let idCounter = 0
+let idCounter = 0;
 
 function generateId(): string {
-  return `dl_${Date.now()}_${++idCounter}`
+  return `dl_${Date.now()}_${++idCounter}`;
+}
+
+// ── Auto-save debounced ──
+
+let saveTimeout: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Salva as configurações no disco via IPC (com debounce de 500ms).
+ */
+function scheduleSave(): void {
+  if (saveTimeout) {
+    clearTimeout(saveTimeout);
+  }
+  saveTimeout = setTimeout(async () => {
+    try {
+      const theme = localStorage.getItem('ytdlp-gui-theme') || 'dark-purple';
+      await window.api.saveSettings({
+        theme,
+        locale: localStorage.getItem('ytdlp-gui-locale') || 'pt-BR',
+        useCookies: settings.useCookies,
+        cookieBrowser: settings.cookieBrowser,
+        outputDir: settings.outputDir,
+        defaultFormat: settings.defaultFormat,
+        mergeFormat: settings.mergeFormat,
+        maxConcurrentDownloads: settings.maxConcurrentDownloads,
+        rateLimit: settings.rateLimit
+      });
+    } catch {
+      // ignora erros de persistência
+    }
+  }, 500);
 }
 
 /**
- * Composable principal — retorna o estado e as ações do store.
+ * Composable principal.
  */
 export function useDownloads() {
-  /**
-   * Adiciona um novo download à fila com status "pending".
-   * Agora inclui flag `loadingTitle` para exibir skeleton enquanto busca título.
-   */
   function addDownload(url: string, title = '', thumbnail = ''): DownloadItem {
     const item: DownloadItem = {
       id: generateId(),
@@ -89,93 +122,154 @@ export function useDownloads() {
       thumbnail,
       loadingTitle: !title,
       status: DownloadStatus.Pending,
+      stage: 'queued',
       percent: 0,
       speed: '',
       eta: '',
       error: '',
-      formatId: settings.defaultFormat
-    }
-    downloads.push(item)
-    return item
+      formatId: settings.defaultFormat,
+      retryCount: 0,
+      isRetrying: false
+    };
+    downloads.push(item);
+    return item;
   }
 
   function updateProgress(id: string, percent: number, speed: string, eta: string): void {
-    const item = downloads.find((d) => d.id === id)
+    const item = downloads.find((d) => d.id === id);
     if (item) {
-      item.status = DownloadStatus.Downloading
-      item.percent = percent
-      item.speed = speed
-      item.eta = eta
+      item.status = DownloadStatus.Downloading;
+      item.percent = percent;
+      item.speed = speed;
+      item.eta = eta;
+    }
+  }
+
+  function updateStage(id: string, stage: DownloadStage): void {
+    const item = downloads.find((d) => d.id === id);
+    if (item) {
+      item.stage = stage;
+      if (stage !== 'queued' && stage !== 'complete') {
+        item.status = DownloadStatus.Downloading;
+      }
+    }
+  }
+
+  function markRetrying(id: string, retryCount: number): void {
+    const item = downloads.find((d) => d.id === id);
+    if (item) {
+      item.retryCount = retryCount;
+      item.isRetrying = true;
+      item.percent = 0;
+      item.speed = '';
+      item.eta = '';
     }
   }
 
   function markComplete(id: string): void {
-    const item = downloads.find((d) => d.id === id)
+    const item = downloads.find((d) => d.id === id);
     if (item) {
-      item.status = DownloadStatus.Complete
-      item.percent = 100
-      item.speed = ''
-      item.eta = ''
+      item.status = DownloadStatus.Complete;
+      item.stage = 'complete';
+      item.percent = 100;
+      item.speed = '';
+      item.eta = '';
+      item.isRetrying = false;
     }
   }
 
   function markError(id: string, error: string): void {
-    const item = downloads.find((d) => d.id === id)
+    const item = downloads.find((d) => d.id === id);
     if (item) {
       if (item.status === DownloadStatus.Complete) {
-        return
+        return;
       }
-      item.status = DownloadStatus.Error
-      item.error = error
+      item.status = DownloadStatus.Error;
+      item.error = error;
+      item.isRetrying = false;
     }
   }
 
   function removeDownload(id: string): void {
-    const index = downloads.findIndex((d) => d.id === id)
+    const index = downloads.findIndex((d) => d.id === id);
     if (index !== -1) {
-      downloads.splice(index, 1)
+      downloads.splice(index, 1);
     }
   }
 
   function clearCompleted(): void {
     for (let i = downloads.length - 1; i >= 0; i--) {
       if (downloads[i].status === DownloadStatus.Complete) {
-        downloads.splice(i, 1)
+        downloads.splice(i, 1);
       }
     }
   }
 
   function setFormat(id: string, formatId: string): void {
-    const item = downloads.find((d) => d.id === id)
+    const item = downloads.find((d) => d.id === id);
     if (item) {
-      item.formatId = formatId
+      item.formatId = formatId;
     }
   }
 
-  /**
-   * Armazena formatos em cache para uma URL.
-   * O FormatDialog consulta o cache antes de fazer nova requisição.
-   */
   function cacheFormats(url: string, title: string, formats: unknown[]): void {
-    formatCache[url] = { title, formats, timestamp: Date.now() }
+    formatCache[url] = { title, formats, timestamp: Date.now() };
+  }
+
+  function getCachedFormats(url: string): CachedFormatInfo | null {
+    const cached = formatCache[url];
+    if (!cached) {
+      return null;
+    }
+
+    const TEN_MINUTES = 10 * 60 * 1000;
+    if (Date.now() - cached.timestamp > TEN_MINUTES) {
+      delete formatCache[url];
+      return null;
+    }
+
+    return cached;
   }
 
   /**
-   * Retorna formatos em cache para uma URL (se existirem e não expiraram).
-   * Cache válido por 10 minutos.
+   * Carrega configurações salvas do disco e aplica no estado reativo.
    */
-  function getCachedFormats(url: string): CachedFormatInfo | null {
-    const cached = formatCache[url]
-    if (!cached) return null
+  async function loadPersistedSettings(): Promise<void> {
+    try {
+      const saved = await window.api.loadSettings();
+      if (saved) {
+        settings.useCookies = saved.useCookies;
+        settings.cookieBrowser = saved.cookieBrowser;
+        settings.outputDir = saved.outputDir;
+        settings.defaultFormat = saved.defaultFormat;
+        settings.mergeFormat = saved.mergeFormat;
+        settings.maxConcurrentDownloads = saved.maxConcurrentDownloads || 3;
+        settings.rateLimit = saved.rateLimit || '0';
 
-    // Cache expira em 10 minutos
-    const TEN_MINUTES = 10 * 60 * 1000
-    if (Date.now() - cached.timestamp > TEN_MINUTES) {
-      delete formatCache[url]
-      return null
+        // Tema e idioma ficam no localStorage (o theme system lê de lá)
+        if (saved.theme) {
+          localStorage.setItem('ytdlp-gui-theme', saved.theme);
+        }
+        if (saved.locale) {
+          localStorage.setItem('ytdlp-gui-locale', saved.locale);
+        }
+      }
+    } catch {
+      // ignora
     }
+  }
 
-    return cached
+  /**
+   * Observa mudanças nas settings e salva automaticamente.
+   */
+  function startAutoSave(): void {
+    watch(
+      () => ({ ...settings }),
+      () => {
+        scheduleSave();
+      },
+      { deep: true }
+    );
   }
 
   return {
@@ -185,12 +279,17 @@ export function useDownloads() {
     formatCache,
     addDownload,
     updateProgress,
+    updateStage,
+    markRetrying,
     markComplete,
     markError,
     removeDownload,
     clearCompleted,
     setFormat,
     cacheFormats,
-    getCachedFormats
-  }
+    getCachedFormats,
+    loadPersistedSettings,
+    startAutoSave,
+    scheduleSave
+  };
 }
