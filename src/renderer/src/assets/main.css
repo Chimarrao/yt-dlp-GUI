@@ -1,0 +1,633 @@
+/* ── Theme CSS Variables ── */
+
+/* Tema padrão: Dark Purple */
+:root,
+.theme-dark-purple {
+  --surface-ground: #0f0f1a;
+  --surface-card: #1a1a2e;
+  --surface-section: #16213e;
+  --surface-overlay: #1a1a2e;
+  --surface-border: #2a2a4a;
+  --text-primary: #e8e8f0;
+  --text-secondary: #a0a0c0;
+  --accent-gradient: linear-gradient(135deg, #667eea, #764ba2);
+  --accent-color: #667eea;
+  --accent-hover: #764ba2;
+  --success-color: #00c853;
+  --danger-color: #ff5252;
+  --warning-color: #ffab40;
+  --sidebar-width: 240px;
+  --drag-region-height: 38px;
+}
+
+/* Dark Monokai: inspirado no tema clássico Monokai */
+.theme-dark-monokai {
+  --surface-ground: #1e1f1c;
+  --surface-card: #272822;
+  --surface-section: #2d2e27;
+  --surface-overlay: #272822;
+  --surface-border: #3e3d32;
+  --text-primary: #f8f8f2;
+  --text-secondary: #75715e;
+  --accent-gradient: linear-gradient(135deg, #a6e22e, #66d9ef);
+  --accent-color: #a6e22e;
+  --accent-hover: #66d9ef;
+  --success-color: #a6e22e;
+  --danger-color: #f92672;
+  --warning-color: #e6db74;
+}
+
+/* Dark Default: cinza neutro, sem temas fortes */
+.theme-dark-default {
+  --surface-ground: #121212;
+  --surface-card: #1e1e1e;
+  --surface-section: #252525;
+  --surface-overlay: #1e1e1e;
+  --surface-border: #333333;
+  --text-primary: #e0e0e0;
+  --text-secondary: #888888;
+  --accent-gradient: linear-gradient(135deg, #5c9ce6, #3d8bfd);
+  --accent-color: #5c9ce6;
+  --accent-hover: #3d8bfd;
+  --success-color: #4caf50;
+  --danger-color: #ef5350;
+  --warning-color: #ff9800;
+}
+
+/* Light: tema claro */
+.theme-light {
+  --surface-ground: #f5f5f5;
+  --surface-card: #ffffff;
+  --surface-section: #fafafa;
+  --surface-overlay: #ffffff;
+  --surface-border: #e0e0e0;
+  --text-primary: #212121;
+  --text-secondary: #757575;
+  --accent-gradient: linear-gradient(135deg, #5c6bc0, #7e57c2);
+  --accent-color: #5c6bc0;
+  --accent-hover: #7e57c2;
+  --success-color: #43a047;
+  --danger-color: #e53935;
+  --warning-color: #fb8c00;
+}
+
+/* ── Global Reset ── */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  min-height: 100vh;
+  background: var(--surface-ground);
+  color: var(--text-primary);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* ── Drag region para janela sem barra de título ── */
+.drag-region {
+  -webkit-app-region: drag;
+  height: var(--drag-region-height);
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 9999;
+}
+
+/* ── Layout principal ── */
+.app-layout {
+  display: flex;
+  height: 100vh;
+}
+
+.sidebar {
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-width);
+  background: var(--surface-card);
+  border-right: 1px solid var(--surface-border);
+  display: flex;
+  flex-direction: column;
+  padding-top: var(--drag-region-height);
+  transition: background 0.3s ease, border-color 0.3s ease;
+}
+
+.sidebar-header {
+  padding: 20px 20px 16px;
+  border-bottom: 1px solid var(--surface-border);
+}
+
+.sidebar-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sidebar-logo .logo-icon {
+  width: 36px;
+  height: 36px;
+  background: var(--accent-gradient);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  color: white;
+  font-weight: 700;
+}
+
+.sidebar-logo h1 {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.sidebar-nav {
+  flex: 1;
+  padding: 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: all 0.2s ease;
+  font-weight: 500;
+  font-size: 13px;
+  border: none;
+  background: none;
+  width: 100%;
+  text-align: left;
+}
+
+.nav-item:hover {
+  background: rgba(102, 126, 234, 0.1);
+  color: var(--text-primary);
+}
+
+.nav-item.active {
+  background: rgba(102, 126, 234, 0.15);
+  color: var(--accent-color);
+}
+
+.nav-item i {
+  font-size: 16px;
+  width: 20px;
+  text-align: center;
+}
+
+.sidebar-footer {
+  padding: 12px 10px;
+  border-top: 1px solid var(--surface-border);
+}
+
+.dep-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.dep-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.dep-dot.ok {
+  background: var(--success-color);
+  box-shadow: 0 0 6px var(--success-color);
+}
+
+.dep-dot.missing {
+  background: var(--danger-color);
+  box-shadow: 0 0 6px var(--danger-color);
+}
+
+.dep-dot.loading {
+  background: var(--warning-color);
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* ── Conteúdo principal ── */
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding-top: var(--drag-region-height);
+  overflow: hidden;
+  transition: background 0.3s ease;
+}
+
+.content-header {
+  padding: 20px 28px 16px;
+  border-bottom: 1px solid var(--surface-border);
+}
+
+.content-body {
+  flex: 1;
+  padding: 20px 28px;
+  overflow-y: auto;
+}
+
+/* ── Input de URL ── */
+.url-input-wrapper {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.url-input-wrapper textarea {
+  flex: 1;
+  background: var(--surface-section);
+  border: 1px solid var(--surface-border);
+  border-radius: 10px;
+  padding: 12px 16px;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  resize: vertical;
+  min-height: 44px;
+  max-height: 120px;
+  transition: border-color 0.2s;
+  outline: none;
+}
+
+.url-input-wrapper textarea:focus {
+  border-color: var(--accent-color);
+}
+
+.url-input-wrapper textarea::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
+
+/* ── Cards de download ── */
+.download-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.download-card {
+  background: var(--surface-card);
+  border: 1px solid var(--surface-border);
+  border-radius: 12px;
+  padding: 16px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.3s ease;
+}
+
+.download-card:hover {
+  border-color: rgba(102, 126, 234, 0.3);
+  box-shadow: 0 2px 12px rgba(102, 126, 234, 0.08);
+}
+
+.download-card-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.download-card-thumb {
+  width: 64px;
+  height: 36px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--surface-section);
+  flex-shrink: 0;
+}
+
+.download-card-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.download-card-title {
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.download-card-url-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.download-card-url {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.copy-url-btn {
+  flex-shrink: 0;
+  opacity: 0.5;
+  transition: opacity 0.2s;
+  cursor: pointer;
+}
+
+.copy-url-btn:hover {
+  opacity: 1;
+}
+
+.download-card-meta {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.format-badge {
+  background: rgba(102, 126, 234, 0.12);
+  color: var(--accent-color);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.download-card-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.download-card-progress {
+  margin-top: 8px;
+}
+
+.download-card-stats {
+  display: flex;
+  gap: 16px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.download-card-stats span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.download-card-error {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: rgba(255, 82, 82, 0.1);
+  border: 1px solid rgba(255, 82, 82, 0.2);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--danger-color);
+  max-height: 80px;
+  overflow-y: auto;
+}
+
+/* ── Badges de status ── */
+.status-badge {
+  padding: 2px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  flex-shrink: 0;
+}
+
+.status-badge.pending {
+  background: rgba(160, 160, 192, 0.15);
+  color: var(--text-secondary);
+}
+
+.status-badge.downloading {
+  background: rgba(102, 126, 234, 0.15);
+  color: var(--accent-color);
+}
+
+.status-badge.complete {
+  background: rgba(0, 200, 83, 0.15);
+  color: var(--success-color);
+}
+
+.status-badge.error {
+  background: rgba(255, 82, 82, 0.15);
+  color: var(--danger-color);
+}
+
+/* ── Configurações ── */
+.settings-section {
+  margin-bottom: 24px;
+}
+
+.settings-section h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: var(--text-primary);
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.settings-row label {
+  font-size: 13px;
+  color: var(--text-secondary);
+  min-width: 140px;
+}
+
+/* Seletor de temas com preview de cores */
+.theme-selector {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.theme-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 2px solid var(--surface-border);
+  background: var(--surface-section);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.theme-chip:hover {
+  border-color: var(--accent-color);
+  color: var(--text-primary);
+}
+
+.theme-chip.active {
+  border-color: var(--accent-color);
+  background: rgba(102, 126, 234, 0.15);
+  color: var(--accent-color);
+}
+
+.theme-chip .theme-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+/* ── Estado vazio ── */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 300px;
+  gap: 12px;
+  color: var(--text-secondary);
+}
+
+.empty-state i {
+  font-size: 48px;
+  opacity: 0.3;
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.empty-state p {
+  font-size: 14px;
+  text-align: center;
+  max-width: 320px;
+  line-height: 1.5;
+}
+
+/* ── Diálogo de formatos ── */
+.format-table-wrapper {
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+/* ── Scrollbars ── */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--surface-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-color);
+}
+
+/* ── PrimeVue overrides ── */
+.p-button {
+  border-radius: 8px !important;
+  font-weight: 500 !important;
+  font-size: 13px !important;
+}
+
+.p-progressbar {
+  height: 6px !important;
+  border-radius: 3px !important;
+  background: var(--surface-section) !important;
+}
+
+.p-progressbar-value {
+  background: var(--accent-gradient) !important;
+  border-radius: 3px !important;
+}
+
+.p-toast {
+  opacity: 0.97;
+}
+
+.p-dialog {
+  border-radius: 14px !important;
+  border: 1px solid var(--surface-border) !important;
+  background: var(--surface-card) !important;
+}
+
+.p-select {
+  border-radius: 8px !important;
+}
+
+.p-toggleswitch.p-toggleswitch-checked .p-toggleswitch-slider {
+  background: var(--accent-color) !important;
+}
+
+.p-datatable .p-datatable-tbody>tr {
+  background: var(--surface-card) !important;
+  transition: background 0.15s !important;
+}
+
+.p-datatable .p-datatable-tbody>tr:hover {
+  background: var(--surface-section) !important;
+}
+
+/* ── Clipboard notification ── */
+.clip-toast {
+  cursor: pointer;
+}
+
+/* ── Transições ── */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
