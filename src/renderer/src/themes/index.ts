@@ -4,7 +4,7 @@
  * Persiste no localStorage.
  */
 
-import { ref, watch, computed } from 'vue';
+import { ref, watch, computed, type ComputedRef } from 'vue';
 
 export type ThemeId = 'dark-purple' | 'dark-monokai' | 'dark-default' | 'light' | 'system';
 
@@ -52,7 +52,15 @@ function applyTheme(themeId: ThemeId): void {
   root.classList.add(`theme-${resolved}`);
 }
 
-export function useTheme() {
+export interface UseThemeResult {
+  currentTheme: typeof currentTheme
+  effectiveTheme: ComputedRef<ThemeId>
+  setTheme: (themeId: ThemeId) => void
+  initTheme: () => void
+  themeOptions: ThemeOption[]
+}
+
+export function useTheme(): UseThemeResult {
   function setTheme(themeId: ThemeId): void {
     currentTheme.value = themeId;
     localStorage.setItem(STORAGE_KEY, themeId);

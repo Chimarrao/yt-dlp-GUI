@@ -3,10 +3,10 @@
  * Suporta EN e PT-BR com troca reativa no Vue.
  */
 
-import { ref, computed } from 'vue';
+import { ref, computed, type ComputedRef } from 'vue'
 
-export type Locale = 'en' | 'pt-BR';
-type TranslationMap = Record<string, string>;
+export type Locale = 'en' | 'pt-BR'
+type TranslationMap = Record<string, string>
 
 const translations: Record<Locale, TranslationMap> = {
   en: {
@@ -23,6 +23,7 @@ const translations: Record<Locale, TranslationMap> = {
     'downloads.items': '{count} item(s) · {completed} completed',
     'downloads.start_all': 'Start All',
     'downloads.clear_completed': 'Clear Completed',
+    'downloads.speed_graph_title': 'Total speed (last seconds)',
 
     'status.pending': 'Queued',
     'status.downloading': 'Downloading',
@@ -44,10 +45,10 @@ const translations: Record<Locale, TranslationMap> = {
     'stage.merging': '🔗 Merging...',
     'stage.complete': '✅ Complete',
 
-    // Retry
+    // Tentativas
     'retry.indicator': '🔄 Attempt {n}/3',
 
-    // Formato dialog
+    // Diálogo de formatos
     'format.title': 'Formats — {title}',
     'format.loading': 'Loading formats...',
     'format.cancel': 'Cancel',
@@ -62,6 +63,10 @@ const translations: Record<Locale, TranslationMap> = {
     'format.col.audio': 'Audio',
     'format.col.type': 'Type',
     'format.col.note': 'Note',
+    'format.audio_only_short': 'Audio',
+    'format.type.both': 'Video + Audio',
+    'format.type.video': 'Video only',
+    'format.type.audio': 'Audio only',
     'format.merge_audio': 'Merge with best audio',
     'format.merge_audio_hint': 'Adds +bestaudio for video-only formats',
     'format.size_estimated': '~{size}',
@@ -72,6 +77,17 @@ const translations: Record<Locale, TranslationMap> = {
     'settings.use_cookies': 'Use browser cookies',
     'settings.browser': 'Browser',
     'settings.browser_placeholder': 'Select',
+    'settings.cookies_file': 'cookies.txt file',
+    'settings.cookies_file_placeholder': 'Optional: select exported cookies.txt',
+    'settings.cookies_help_primary':
+      'Use cookies when YouTube asks for authentication or bot confirmation.',
+    'settings.cookies_help_file':
+      'If you select a file, it must be a cookies.txt exported in Netscape format.',
+    'settings.cookies_help_strategy':
+      'For YouTube, the app can try browser cookies and the Netscape file automatically.',
+    'settings.proxy': 'Proxy',
+    'settings.proxy_placeholder': 'Optional, e.g. http://user:pass@host:port',
+    'settings.proxy_hint': 'Useful when YouTube limits high resolutions by IP/session',
     'settings.output': 'Output',
     'settings.output_dir': 'Download directory',
     'settings.output_dir_placeholder': 'Select a directory...',
@@ -85,7 +101,9 @@ const translations: Record<Locale, TranslationMap> = {
     'settings.downloads': 'Downloads',
     'settings.max_concurrent': 'Max simultaneous downloads',
     'settings.rate_limit': 'Speed limit',
-    'settings.rate_limit_hint': '0 = unlimited, e.g. 5M = 5 MB/s',
+    'settings.rate_limit_hint':
+      'Approximate total limit. 0 = unlimited, e.g. 5M ≈ 5 MB/s split across active downloads.',
+    'settings.rate_limit_invalid': 'Invalid speed limit. Use 0, 500K, 5M or 1G.',
 
     'format_option.best_video_audio': 'Best Video + Audio',
     'format_option.best_single': 'Best (single file)',
@@ -102,6 +120,7 @@ const translations: Record<Locale, TranslationMap> = {
     'toast.url_detected_detail': '{count} YouTube URL(s) detected in clipboard',
     'toast.format_selected': 'Format selected',
     'toast.format_selected_detail': 'Format {id} selected',
+    'toast.url_copied': 'URL copied',
 
     'notification.url_detected': 'YouTube URL detected: {url}',
     'notification.download_complete_title': 'Download Complete',
@@ -124,6 +143,7 @@ const translations: Record<Locale, TranslationMap> = {
     'downloads.items': '{count} item(ns) · {completed} concluído(s)',
     'downloads.start_all': 'Iniciar Todos',
     'downloads.clear_completed': 'Limpar Concluídos',
+    'downloads.speed_graph_title': 'Velocidade total (últimos segundos)',
 
     'status.pending': 'Na Fila',
     'status.downloading': 'Baixando',
@@ -161,6 +181,10 @@ const translations: Record<Locale, TranslationMap> = {
     'format.col.audio': 'Áudio',
     'format.col.type': 'Tipo',
     'format.col.note': 'Nota',
+    'format.audio_only_short': 'Áudio',
+    'format.type.both': 'Vídeo + Áudio',
+    'format.type.video': 'Somente vídeo',
+    'format.type.audio': 'Somente áudio',
     'format.merge_audio': 'Mesclar com melhor áudio',
     'format.merge_audio_hint': 'Adiciona +bestaudio para formatos sem áudio',
     'format.size_estimated': '~{size}',
@@ -170,6 +194,17 @@ const translations: Record<Locale, TranslationMap> = {
     'settings.use_cookies': 'Usar cookies do navegador',
     'settings.browser': 'Navegador',
     'settings.browser_placeholder': 'Selecione',
+    'settings.cookies_file': 'Arquivo cookies.txt',
+    'settings.cookies_file_placeholder': 'Opcional: selecione um cookies.txt exportado',
+    'settings.cookies_help_primary':
+      'Use cookies quando o YouTube pedir autenticação ou confirmação de bot.',
+    'settings.cookies_help_file':
+      'Se escolher um arquivo, ele precisa ser um cookies.txt exportado em formato Netscape.',
+    'settings.cookies_help_strategy':
+      'No YouTube, o app pode tentar automaticamente os cookies do navegador e o arquivo Netscape.',
+    'settings.proxy': 'Proxy',
+    'settings.proxy_placeholder': 'Opcional, ex: http://user:pass@host:porta',
+    'settings.proxy_hint': 'Ajuda quando o YouTube limita resoluções altas por IP/sessão',
     'settings.output': 'Saída',
     'settings.output_dir': 'Diretório de download',
     'settings.output_dir_placeholder': 'Selecione um diretório...',
@@ -183,7 +218,9 @@ const translations: Record<Locale, TranslationMap> = {
     'settings.downloads': 'Downloads',
     'settings.max_concurrent': 'Downloads simultâneos',
     'settings.rate_limit': 'Limite de velocidade',
-    'settings.rate_limit_hint': '0 = ilimitado, ex: 5M = 5 MB/s',
+    'settings.rate_limit_hint':
+      'Limite total aproximado. 0 = ilimitado, ex: 5M ≈ 5 MB/s dividido entre downloads ativos.',
+    'settings.rate_limit_invalid': 'Limite inválido. Use 0, 500K, 5M ou 1G.',
 
     'format_option.best_video_audio': 'Melhor Vídeo + Áudio',
     'format_option.best_single': 'Melhor (single file)',
@@ -200,6 +237,7 @@ const translations: Record<Locale, TranslationMap> = {
     'toast.url_detected_detail': '{count} URL(s) do YouTube detectada(s) na área de transferência',
     'toast.format_selected': 'Formato selecionado',
     'toast.format_selected_detail': 'Formato {id} selecionado',
+    'toast.url_copied': 'URL copiada',
 
     'notification.url_detected': 'YouTube URL detectada: {url}',
     'notification.download_complete_title': 'Download Concluído',
@@ -207,36 +245,40 @@ const translations: Record<Locale, TranslationMap> = {
 
     'lang.label': 'Idioma'
   }
-};
+}
 
-const currentLocale = ref<Locale>(
-  (localStorage.getItem('ytdlp-gui-locale') as Locale) || 'pt-BR'
-);
+const currentLocale = ref<Locale>((localStorage.getItem('ytdlp-gui-locale') as Locale) || 'pt-BR')
 
 function t(key: string, params?: Record<string, string | number>): string {
-  let text = translations[currentLocale.value][key] || key;
+  let text = translations[currentLocale.value][key] || key
 
   if (params) {
     for (const [k, v] of Object.entries(params)) {
-      text = text.replace(new RegExp(`\\{${k}\\}`, 'g'), String(v));
+      text = text.replace(new RegExp(`\\{${k}\\}`, 'g'), String(v))
     }
   }
 
-  return text;
+  return text
 }
 
-export function useI18n() {
+export function useI18n(): {
+  t: (key: string, params?: Record<string, string | number>) => string
+  currentLocale: typeof currentLocale
+  toggleLocale: () => void
+  setLocale: (locale: Locale) => void
+  localeLabel: ComputedRef<string>
+} {
   function toggleLocale(): void {
-    currentLocale.value = currentLocale.value === 'pt-BR' ? 'en' : 'pt-BR';
-    localStorage.setItem('ytdlp-gui-locale', currentLocale.value);
+    currentLocale.value = currentLocale.value === 'pt-BR' ? 'en' : 'pt-BR'
+    localStorage.setItem('ytdlp-gui-locale', currentLocale.value)
   }
 
   function setLocale(locale: Locale): void {
-    currentLocale.value = locale;
-    localStorage.setItem('ytdlp-gui-locale', locale);
+    currentLocale.value = locale
+    localStorage.setItem('ytdlp-gui-locale', locale)
   }
 
-  const localeLabel = computed(() => (currentLocale.value === 'pt-BR' ? '🇧🇷 PT-BR' : '🇺🇸 EN'));
+  const localeLabel = computed(() => (currentLocale.value === 'pt-BR' ? '🇧🇷 PT-BR' : '🇺🇸 EN'))
 
   return {
     t,
@@ -244,5 +286,5 @@ export function useI18n() {
     toggleLocale,
     setLocale,
     localeLabel
-  };
+  }
 }

@@ -17,6 +17,8 @@ export interface PersistedSettings {
   locale: string;
   useCookies: boolean;
   cookieBrowser: string;
+  cookiesFilePath: string;
+  proxyUrl: string;
   outputDir: string;
   defaultFormat: string;
   mergeFormat: string;
@@ -30,6 +32,8 @@ const DEFAULTS: PersistedSettings = {
   locale: 'pt-BR',
   useCookies: true,
   cookieBrowser: 'chrome',
+  cookiesFilePath: '',
+  proxyUrl: '',
   outputDir: '~/Downloads',
   defaultFormat: 'bestvideo+bestaudio',
   mergeFormat: 'mkv',

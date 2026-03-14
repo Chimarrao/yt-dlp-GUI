@@ -24,6 +24,8 @@ interface FormatInfo {
 interface CookieOptions {
   useCookies: boolean;
   cookieBrowser: string;
+  cookiesFilePath?: string;
+  proxyUrl?: string;
 }
 
 interface VideoInfo {
@@ -47,6 +49,8 @@ interface PersistedSettings {
   locale: string;
   useCookies: boolean;
   cookieBrowser: string;
+  cookiesFilePath: string;
+  proxyUrl: string;
   outputDir: string;
   defaultFormat: string;
   mergeFormat: string;
@@ -67,6 +71,7 @@ interface AppAPI {
   startDownload(options: Record<string, unknown>): Promise<void>;
   cancelDownload(id: string): Promise<boolean>;
   selectDirectory(): Promise<string | null>;
+  selectCookiesFile(): Promise<string | null>;
   notify(title: string, body: string): void;
   onClipboardUrl(callback: (urls: string[]) => void): () => void;
   onDownloadProgress(callback: (data: DownloadProgress) => void): () => void;
@@ -74,6 +79,7 @@ interface AppAPI {
   onDownloadError(callback: (data: { id: string; error: string }) => void): () => void;
   onDownloadStage(callback: (data: { id: string; stage: string }) => void): () => void;
   onDownloadRetry(callback: (data: { id: string; retryCount: number }) => void): () => void;
+  onDownloadCancelled(callback: (data: { id: string }) => void): () => void;
 }
 
 declare global {

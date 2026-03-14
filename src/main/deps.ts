@@ -15,9 +15,17 @@ import { Platform, getCurrentPlatform, getWhichCommand, isWindows } from '../sha
 
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
+const NIGHTLY_DOWNLOAD_TIMEOUT_MS = 12000;
+
+let cachedPreferredYtdlpPath: string | null = null;
+let triedNightlyDownload = false;
 
 function getUserBinPath(): string {
   return join(app.getPath('userData'), 'bin');
+}
+
+function getYtdlpNightlyPath(): string {
+  return join(getUserBinPath(), isWindows() ? 'yt-dlp-nightly.exe' : 'yt-dlp-nightly');
 }
 
 /**
@@ -38,6 +46,71 @@ function findInPath(name: string): Promise<string | null> {
     });
 }
 
+async function downloadYtdlpNightly(): Promise<string | null> {
+  const platform = getCurrentPlatform();
+  const binDir = getUserBinPath();
+  mkdirSync(binDir, { recursive: true });
+
+  const nightlyPath = getYtdlpNightlyPath();
+  if (await isExecutableYtdlp(nightlyPath)) {
+    return nightlyPath;
+  }
+
+  const downloadUrl = platform === Platform.Mac
+    ? 'https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp_macos'
+    : platform === Platform.Windows
+      ? 'https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.exe'
+      : 'https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp';
+
+  try {
+    await downloadFile(downloadUrl, nightlyPath);
+    if (!isWindows()) {
+      chmodSync(nightlyPath, 0o755);
+    }
+    await execFileAsync(nightlyPath, ['--version']);
+    return nightlyPath;
+  } catch {
+    return null;
+  }
+}
+
+export async function getPreferredYtdlpPath(): Promise<string | null> {
+  if (cachedPreferredYtdlpPath) {
+    return cachedPreferredYtdlpPath;
+  }
+
+  const nightlyPath = getYtdlpNightlyPath();
+  if (await isExecutableYtdlp(nightlyPath)) {
+    cachedPreferredYtdlpPath = nightlyPath;
+    return cachedPreferredYtdlpPath;
+  }
+
+  if (!triedNightlyDownload) {
+    triedNightlyDownload = true;
+    const nightly = await downloadYtdlpNightly();
+    if (nightly) {
+      cachedPreferredYtdlpPath = nightly;
+      return cachedPreferredYtdlpPath;
+    }
+  }
+
+  cachedPreferredYtdlpPath = await findInPath('yt-dlp');
+  return cachedPreferredYtdlpPath;
+}
+
+async function isExecutableYtdlp(filePath: string): Promise<boolean> {
+  if (!existsSync(filePath)) {
+    return false;
+  }
+
+  try {
+    await execFileAsync(filePath, ['--version']);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Faz download de um arquivo via HTTPS com redirecionamentos.
  *
@@ -48,10 +121,14 @@ function findInPath(name: string): Promise<string | null> {
 function downloadFile(url: string, dest: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const followRedirects = (currentUrl: string): void => {
-      https
-        .get(currentUrl, (response) => {
+      const req = https.get(currentUrl, (response) => {
           if (response.statusCode === 301 || response.statusCode === 302) {
             followRedirects(response.headers.location!);
+            return;
+          }
+
+          if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
+            reject(new Error(`Download failed with status ${response.statusCode ?? 'unknown'}`));
             return;
           }
 
@@ -62,8 +139,13 @@ function downloadFile(url: string, dest: string): Promise<void> {
             fileStream.close();
             resolve();
           });
-        })
-        .on('error', reject);
+      });
+
+      req.setTimeout(NIGHTLY_DOWNLOAD_TIMEOUT_MS, () => {
+        req.destroy(new Error('Download timeout'));
+      });
+
+      req.on('error', reject);
     };
 
     followRedirects(url);

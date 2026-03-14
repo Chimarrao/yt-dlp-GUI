@@ -1,11 +1,11 @@
 /**
- * Script de preload — ponte segura entre o Main Process e o Renderer.
+ * Script de preload — ponte segura entre o processo principal e o renderer.
  *
  * Expõe funções seguras para o renderer via `contextBridge.exposeInMainWorld`.
  */
 
-import { contextBridge, ipcRenderer } from 'electron';
-import { electronAPI } from '@electron-toolkit/preload';
+import { contextBridge, ipcRenderer } from 'electron'
+import { electronAPI } from '@electron-toolkit/preload'
 
 const api = {
   // ── Dependências ──
@@ -14,7 +14,8 @@ const api = {
 
   // ── Configurações persistidas ──
   loadSettings: () => ipcRenderer.invoke('settings:load'),
-  saveSettings: (settings: Record<string, unknown>) => ipcRenderer.invoke('settings:save', settings),
+  saveSettings: (settings: Record<string, unknown>) =>
+    ipcRenderer.invoke('settings:save', settings),
 
   // ── Operações do yt-dlp ──
   fetchQuickInfo: (url: string, cookies?: { useCookies: boolean; cookieBrowser: string }) =>
@@ -30,15 +31,16 @@ const api = {
 
   // ── Diálogos do SO ──
   selectDirectory: () => ipcRenderer.invoke('dialog:select-directory'),
+  selectCookiesFile: () => ipcRenderer.invoke('dialog:select-cookies-file'),
 
   // ── Notificações ──
   notify: (title: string, body: string) => ipcRenderer.send('notify', { title, body }),
 
-  // ── Listeners de eventos do main ──
+  // ── Listeners de eventos do processo principal ──
   onClipboardUrl: (callback: (urls: string[]) => void) => {
-    const handler = (_: unknown, urls: string[]): void => callback(urls);
-    ipcRenderer.on('clipboard:youtube-url', handler);
-    return () => ipcRenderer.removeListener('clipboard:youtube-url', handler);
+    const handler = (_: unknown, urls: string[]): void => callback(urls)
+    ipcRenderer.on('clipboard:youtube-url', handler)
+    return () => ipcRenderer.removeListener('clipboard:youtube-url', handler)
   },
 
   onDownloadProgress: (
@@ -47,48 +49,54 @@ const api = {
     const handler = (
       _: unknown,
       data: { id: string; percent: number; speed: string; eta: string }
-    ): void => callback(data);
-    ipcRenderer.on('download:progress', handler);
-    return () => ipcRenderer.removeListener('download:progress', handler);
+    ): void => callback(data)
+    ipcRenderer.on('download:progress', handler)
+    return () => ipcRenderer.removeListener('download:progress', handler)
   },
 
   onDownloadComplete: (callback: (data: { id: string }) => void) => {
-    const handler = (_: unknown, data: { id: string }): void => callback(data);
-    ipcRenderer.on('download:complete', handler);
-    return () => ipcRenderer.removeListener('download:complete', handler);
+    const handler = (_: unknown, data: { id: string }): void => callback(data)
+    ipcRenderer.on('download:complete', handler)
+    return () => ipcRenderer.removeListener('download:complete', handler)
   },
 
   onDownloadError: (callback: (data: { id: string; error: string }) => void) => {
-    const handler = (_: unknown, data: { id: string; error: string }): void => callback(data);
-    ipcRenderer.on('download:error', handler);
-    return () => ipcRenderer.removeListener('download:error', handler);
+    const handler = (_: unknown, data: { id: string; error: string }): void => callback(data)
+    ipcRenderer.on('download:error', handler)
+    return () => ipcRenderer.removeListener('download:error', handler)
   },
 
   /** Listener para mudança de etapa do download */
   onDownloadStage: (callback: (data: { id: string; stage: string }) => void) => {
-    const handler = (_: unknown, data: { id: string; stage: string }): void => callback(data);
-    ipcRenderer.on('download:stage', handler);
-    return () => ipcRenderer.removeListener('download:stage', handler);
+    const handler = (_: unknown, data: { id: string; stage: string }): void => callback(data)
+    ipcRenderer.on('download:stage', handler)
+    return () => ipcRenderer.removeListener('download:stage', handler)
   },
 
-  /** Listener para notificação de retry */
+  /** Listener para notificação de nova tentativa */
   onDownloadRetry: (callback: (data: { id: string; retryCount: number }) => void) => {
-    const handler = (_: unknown, data: { id: string; retryCount: number }): void => callback(data);
-    ipcRenderer.on('download:retry', handler);
-    return () => ipcRenderer.removeListener('download:retry', handler);
+    const handler = (_: unknown, data: { id: string; retryCount: number }): void => callback(data)
+    ipcRenderer.on('download:retry', handler)
+    return () => ipcRenderer.removeListener('download:retry', handler)
+  },
+
+  onDownloadCancelled: (callback: (data: { id: string }) => void) => {
+    const handler = (_: unknown, data: { id: string }): void => callback(data)
+    ipcRenderer.on('download:cancelled', handler)
+    return () => ipcRenderer.removeListener('download:cancelled', handler)
   }
-};
+}
 
 if (process.contextIsolated) {
   try {
-    contextBridge.exposeInMainWorld('electron', electronAPI);
-    contextBridge.exposeInMainWorld('api', api);
+    contextBridge.exposeInMainWorld('electron', electronAPI)
+    contextBridge.exposeInMainWorld('api', api)
   } catch (error) {
-    console.error(error);
+    console.error(error)
   }
 } else {
   // @ts-ignore — modo legado
-  window.electron = electronAPI;
-  // @ts-ignore
-  window.api = api;
+  window.electron = electronAPI
+  // @ts-ignore -- atribuição legada em contexto sem isolamento
+  window.api = api
 }
