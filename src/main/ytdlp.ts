@@ -11,10 +11,9 @@
 
 import { spawn, ChildProcess } from 'child_process'
 import { BrowserWindow, Notification } from 'electron'
-import { existsSync, readdirSync, unlinkSync } from 'fs'
+import { appendFileSync, existsSync, readdirSync, unlinkSync } from 'fs'
 import { join } from 'path'
-import { checkDep, getPreferredYtdlpPath } from './deps'
-import { generatePoToken } from './po-token'
+import { checkDep } from './deps'
 
 // ── Processos e fila ──
 
@@ -37,8 +36,6 @@ let maxConcurrent = 3
 
 // ── Interfaces ──
 
-type AuthStrategyLabel = 'none' | 'cookies-file' | 'cookies-browser'
-
 export interface DownloadOptions {
   id: string
   url: string
@@ -51,12 +48,6 @@ export interface DownloadOptions {
   mergeFormat?: string
   rateLimit?: string
   _dropCookiesForRetry?: boolean
-  _forceCookiesForRetry?: boolean
-  _youtubeExtractorArgs?: string
-  _youtubeExtractorCandidates?: string[]
-  _youtubeExtractorIndex?: number
-  _youtubeAuthStrategyLabels?: AuthStrategyLabel[]
-  _youtubeAuthStrategyIndex?: number
 }
 
 export interface CookieOptions {
@@ -94,17 +85,6 @@ export interface QuickVideoInfo {
   thumbnail: string
 }
 
-interface CookieAuthStrategy {
-  label: Exclude<AuthStrategyLabel, 'none'>
-  args: string[]
-}
-
-interface YouTubeAttemptPreference {
-  extractorArgs: string
-  authStrategyLabel: AuthStrategyLabel
-  updatedAt: number
-}
-
 // ── Etapas do download ──
 export type DownloadStage =
   | 'queued'
@@ -115,72 +95,48 @@ export type DownloadStage =
   | 'complete'
 
 const RATE_LIMIT_REGEX = /^(?:0|\d+(?:\.\d+)?[KMG]?)$/i
-const FORMAT_PROBE_TIMEOUT_MS = 40000 // 40 segundos por candidato (YouTube pode ser lento)
-const FORMAT_PROBE_QUEUE_DELAY_MS = 1500
-const PO_TOKEN_TIMEOUT_MS = 4000
-
+const FORMAT_PROBE_TIMEOUT_MS = 30000 // Timeout curto para manter UX responsiva.
+const YOUTUBE_EXTRACTOR_ARGS = 'youtube:player_client=web,web_creator,tv'
+const LOG_FILE_PATH = join(process.cwd(), 'logs.txt')
 const inFlightFormatRequests = new Map<string, Promise<VideoInfo>>()
-const youtubeAttemptPreferences = new Map<string, YouTubeAttemptPreference>()
-const formatProbeQueue: Array<{
-  url: string
-  cookies?: CookieOptions
-  ytdlpPath: string
-  resolve: (value: VideoInfo) => void
-  reject: (reason?: unknown) => void
-}> = []
-let formatProbeRunning = false
-let nextFormatProbeAt = 0
+let formatProbeQueue: Promise<void> = Promise.resolve()
+let ytdlpPathCache: string | null = null
+let ytdlpPathInFlight: Promise<string> | null = null
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+function logYtdlp(message: string, data?: unknown): void {
+  const line = `${new Date().toISOString()} ${message}${
+    data === undefined ? '' : ` ${typeof data === 'string' ? data : JSON.stringify(data)}`
+  }`
+  console.log(line)
+  try {
+    appendFileSync(LOG_FILE_PATH, `${line}\n`)
+  } catch {
+    // Evita quebrar o fluxo caso o arquivo de log não esteja acessível.
+  }
 }
 
-function processFormatProbeQueue(): void {
-  if (formatProbeRunning) {
-    return
-  }
-
-  const next = formatProbeQueue.shift()
-  if (!next) {
-    return
-  }
-
-  formatProbeRunning = true
-  ;(async () => {
-    try {
-      const waitMs = Math.max(0, nextFormatProbeAt - Date.now())
-      if (waitMs > 0) {
-        console.log('[listFormats] Waiting', waitMs, 'ms before next queued probe')
-        await sleep(waitMs)
-      }
-
-      const info = await listFormatsImpl(next.url, next.cookies, next.ytdlpPath)
-      next.resolve(info)
-    } catch (err) {
-      next.reject(err)
-    } finally {
-      nextFormatProbeAt = Date.now() + FORMAT_PROBE_QUEUE_DELAY_MS
-      formatProbeRunning = false
-      processFormatProbeQueue()
-    }
-  })().catch((err) => {
-    console.error('[listFormats] Unexpected queue error:', err)
-    next.reject(err)
-    nextFormatProbeAt = Date.now() + FORMAT_PROBE_QUEUE_DELAY_MS
-    formatProbeRunning = false
-    processFormatProbeQueue()
-  })
+function enqueueFormatProbe<T>(task: () => Promise<T>): Promise<T> {
+  const run = formatProbeQueue.then(task, task)
+  formatProbeQueue = run.then(
+    () => undefined,
+    () => undefined
+  )
+  return run
 }
 
-function enqueueFormatProbe(
-  url: string,
-  cookies: CookieOptions | undefined,
-  ytdlpPath: string
-): Promise<VideoInfo> {
-  return new Promise((resolve, reject) => {
-    formatProbeQueue.push({ url, cookies, ytdlpPath, resolve, reject })
-    processFormatProbeQueue()
-  })
+function extractJsonPayload(text: string): string | null {
+  const trimmed = text.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  const start = trimmed.indexOf('{')
+  const end = trimmed.lastIndexOf('}')
+  if (start < 0 || end < start) {
+    return null
+  }
+
+  return trimmed.slice(start, end + 1)
 }
 
 function buildFormatRequestKey(url: string, cookies?: CookieOptions): string {
@@ -193,254 +149,16 @@ function buildFormatRequestKey(url: string, cookies?: CookieOptions): string {
   })
 }
 
-function buildDownloadRequestKey(
-  options: Pick<
-    DownloadOptions,
-    'url' | 'useCookies' | 'cookieBrowser' | 'cookiesFilePath' | 'proxyUrl'
-  >
-): string {
-  return buildFormatRequestKey(options.url, {
-    useCookies: options.useCookies,
-    cookieBrowser: options.cookieBrowser,
-    cookiesFilePath: options.cookiesFilePath,
-    proxyUrl: options.proxyUrl
-  })
-}
-
-function rememberSuccessfulYouTubeAttempt(
-  requestKey: string,
-  extractorArgs: string,
-  authStrategyLabel: AuthStrategyLabel
-): void {
-  if (!extractorArgs) {
-    return
-  }
-
-  youtubeAttemptPreferences.set(requestKey, {
-    extractorArgs,
-    authStrategyLabel,
-    updatedAt: Date.now()
-  })
-}
-
-function getPreferredYouTubeAttempt(requestKey: string): YouTubeAttemptPreference | null {
-  const preference = youtubeAttemptPreferences.get(requestKey)
-  if (!preference) {
-    return null
-  }
-
-  const THIRTY_MINUTES = 30 * 60 * 1000
-  if (Date.now() - preference.updatedAt > THIRTY_MINUTES) {
-    youtubeAttemptPreferences.delete(requestKey)
-    return null
-  }
-
-  return preference
-}
-
 function isYouTubeUrl(url: string): boolean {
   return /(?:^|\.)youtube\.com|youtu\.be|music\.youtube\.com/i.test(url)
 }
 
-function extractYouTubeVideoId(url: string): string | null {
-  const fromShort = url.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/)
-  if (fromShort?.[1]) {
-    return fromShort[1]
-  }
-
-  const fromQuery = url.match(/[?&]v=([a-zA-Z0-9_-]{11})/)
-  if (fromQuery?.[1]) {
-    return fromQuery[1]
-  }
-
-  const fromEmbed = url.match(/(?:embed|shorts)\/([a-zA-Z0-9_-]{11})/)
-  if (fromEmbed?.[1]) {
-    return fromEmbed[1]
-  }
-
-  return null
-}
-
-function buildYouTubeExtractorArgs(client: string, poToken?: string, visitorData?: string): string {
-  let extractorArgs = `youtube:player_client=${client}`
-
-  if (poToken) {
-    extractorArgs += `;po_token=web.gvs+${poToken}`
-  }
-  if (visitorData) {
-    extractorArgs += `;visitor_data=${visitorData}`
-  }
-
-  return extractorArgs
-}
-
-async function resolveYouTubeExtractorArgs(url: string): Promise<string> {
-  if (!isYouTubeUrl(url)) {
-    return ''
-  }
-
-  const videoId = extractYouTubeVideoId(url)
-  if (!videoId) {
-    return buildYouTubeExtractorArgs('default')
-  }
-
-  try {
-    const { poToken, visitorData } = await generatePoToken(videoId)
-    return buildYouTubeExtractorArgs('default', poToken, visitorData)
-  } catch {
-    return buildYouTubeExtractorArgs('default')
-  }
-}
-
-async function resolveYouTubeExtractorArgsCandidates(url: string): Promise<string[]> {
-  if (!isYouTubeUrl(url)) {
-    return []
-  }
-
-  console.log('[resolveYouTubeExtractorArgsCandidates] Starting for URL:', url)
-
-  const withoutToken = buildYouTubeExtractorArgs('default')
-  const legacyWithoutToken = buildYouTubeExtractorArgs('default,-tv_simply')
-  const safariWithoutToken = buildYouTubeExtractorArgs('web_safari')
-
-  let withToken = withoutToken
-  let poTokenResolved = false
-  try {
-    console.log(
-      '[resolveYouTubeExtractorArgsCandidates] Attempting to fetch po-token (timeout:',
-      PO_TOKEN_TIMEOUT_MS,
-      'ms)'
-    )
-    withToken = await Promise.race<string>([
-      resolveYouTubeExtractorArgs(url).then((token) => {
-        console.log('[resolveYouTubeExtractorArgsCandidates] po-token resolved successfully')
-        poTokenResolved = true
-        return token
-      }),
-      new Promise<string>((resolve) => {
-        setTimeout(() => {
-          console.log(
-            '[resolveYouTubeExtractorArgsCandidates] po-token fetch timed out after',
-            PO_TOKEN_TIMEOUT_MS,
-            'ms'
-          )
-          resolve(withoutToken)
-        }, PO_TOKEN_TIMEOUT_MS)
-      })
-    ])
-  } catch (err) {
-    console.error('[resolveYouTubeExtractorArgsCandidates] Error during po-token fetch:', err)
-    withToken = withoutToken
-  }
-
-  const legacyWithToken = withToken.replace(
-    'player_client=default',
-    'player_client=default,-tv_simply'
-  )
-
-  const candidates = [
-    ...new Set([withoutToken, legacyWithoutToken, safariWithoutToken, withToken, legacyWithToken])
-  ].filter(Boolean)
-
-  console.log(
-    '[resolveYouTubeExtractorArgsCandidates] Generated',
-    candidates.length,
-    'candidates (poTokenResolved:',
-    poTokenResolved,
-    ')'
-  )
-  return candidates
-}
-
-function getYouTubeExtractorCandidatePriority(candidate: string): number {
-  if (candidate.includes('player_client=default,-tv_simply') && candidate.includes('po_token=')) {
-    return 0
-  }
-  if (candidate.includes('player_client=default,-tv_simply')) {
-    return 1
-  }
-  if (candidate.includes('player_client=default') && candidate.includes('po_token=')) {
-    return 2
-  }
-  if (candidate.includes('player_client=default')) {
-    return 3
-  }
-  if (candidate.includes('player_client=web_safari')) {
-    return 4
-  }
-  return 5
-}
-
-function prioritizeYouTubeExtractorCandidates(
-  candidates: string[],
-  preferredExtractorArgs?: string
-): string[] {
-  const uniqueCandidates = [...new Set(candidates.filter(Boolean))]
-
-  return uniqueCandidates.sort((a, b) => {
-    if (preferredExtractorArgs) {
-      if (a === preferredExtractorArgs) {
-        return -1
-      }
-      if (b === preferredExtractorArgs) {
-        return 1
-      }
-    }
-
-    return getYouTubeExtractorCandidatePriority(a) - getYouTubeExtractorCandidatePriority(b)
-  })
-}
-
-function getMaxHeight(formats: FormatInfo[]): number {
-  return formats.reduce((max, format) => Math.max(max, format.height || 0), 0)
-}
-
-function chooseBestVideoInfo(candidates: VideoInfo[]): VideoInfo {
-  const sorted = [...candidates].sort((a, b) => {
-    const maxHeightA = getMaxHeight(a.formats)
-    const maxHeightB = getMaxHeight(b.formats)
-    if (maxHeightA !== maxHeightB) {
-      return maxHeightB - maxHeightA
-    }
-
-    const highCountA = a.formats.filter((f) => (f.height || 0) > 1080).length
-    const highCountB = b.formats.filter((f) => (f.height || 0) > 1080).length
-    if (highCountA !== highCountB) {
-      return highCountB - highCountA
-    }
-
-    return b.formats.length - a.formats.length
-  })
-
-  return sorted[0]
-}
-
 function shouldUseCookiesForAttempt(options: DownloadOptions): boolean {
-  if (!options.useCookies || options._dropCookiesForRetry) {
-    return false
-  }
-  if (options._forceCookiesForRetry) {
-    return true
-  }
-  // No YouTube, os downloads agora usam uma sequência explícita de autenticação em executeDownload.
-  if (isYouTubeUrl(options.url)) {
-    return false
-  }
-  return true
+  return options.useCookies && !options._dropCookiesForRetry
 }
 
 function needsFfmpeg(format: string): boolean {
   return format.includes('+')
-}
-
-function shouldRetryWithCookies(stderrOutput: string): boolean {
-  return /sign in|private video|age-restricted|confirm your age|members-only|login|bot/i.test(
-    stderrOutput
-  )
-}
-
-function shouldDropCookiesForFormatRestriction(stderrOutput: string): boolean {
-  return /Requested format is not available/i.test(stderrOutput)
 }
 
 function applyCookiesArgs(
@@ -460,122 +178,6 @@ function applyCookiesArgs(
   }
 
   args.push('--cookies-from-browser', cookieBrowser)
-}
-
-function buildCookieAuthStrategies(
-  cookieBrowser: string,
-  cookiesFilePath?: string,
-  preferredLabel?: Exclude<AuthStrategyLabel, 'none'>
-): CookieAuthStrategy[] {
-  const strategies: CookieAuthStrategy[] = []
-  const cookiePath = (cookiesFilePath || '').trim()
-
-  const browser = (cookieBrowser || 'chrome').trim()
-  if (browser) {
-    strategies.push({ label: 'cookies-browser', args: ['--cookies-from-browser', browser] })
-  }
-
-  if (cookiePath && existsSync(cookiePath)) {
-    strategies.push({ label: 'cookies-file', args: ['--cookies', cookiePath] })
-  }
-
-  if (!preferredLabel) {
-    return strategies
-  }
-
-  return strategies.sort((a, b) => {
-    if (a.label === preferredLabel) {
-      return -1
-    }
-    if (b.label === preferredLabel) {
-      return 1
-    }
-    return 0
-  })
-}
-
-function buildYouTubeDownloadAuthStrategyOrder(
-  options: Pick<DownloadOptions, 'useCookies' | 'cookieBrowser' | 'cookiesFilePath'>,
-  preferredLabel?: AuthStrategyLabel
-): AuthStrategyLabel[] {
-  const order: AuthStrategyLabel[] = []
-
-  if (options.useCookies) {
-    const preferredCookieStrategy =
-      preferredLabel && preferredLabel !== 'none' ? preferredLabel : 'cookies-browser'
-
-    for (const strategy of buildCookieAuthStrategies(
-      options.cookieBrowser,
-      options.cookiesFilePath,
-      preferredCookieStrategy
-    )) {
-      order.push(strategy.label)
-    }
-  }
-
-  order.push('none')
-
-  if (preferredLabel) {
-    const preferredIndex = order.indexOf(preferredLabel)
-    if (preferredIndex > 0) {
-      order.splice(preferredIndex, 1)
-      order.unshift(preferredLabel)
-    }
-  }
-
-  return [...new Set(order)]
-}
-
-function applyCookieStrategyArgs(
-  args: string[],
-  label: AuthStrategyLabel,
-  cookieBrowser: string,
-  cookiesFilePath?: string
-): void {
-  if (label === 'none') {
-    return
-  }
-
-  const strategy = buildCookieAuthStrategies(cookieBrowser, cookiesFilePath, label).find(
-    (candidate) => candidate.label === label
-  )
-
-  if (strategy) {
-    args.push(...strategy.args)
-  }
-}
-
-function advanceYouTubeAuthStrategy(options: DownloadOptions): boolean {
-  const currentIndex = options._youtubeAuthStrategyIndex || 0
-  const labels = options._youtubeAuthStrategyLabels || []
-  if (currentIndex >= labels.length - 1) {
-    return false
-  }
-
-  options._youtubeAuthStrategyIndex = currentIndex + 1
-  return true
-}
-
-function resetYouTubeAuthStrategyOrder(
-  options: DownloadOptions,
-  preferredLabel?: AuthStrategyLabel
-): void {
-  options._youtubeAuthStrategyLabels = buildYouTubeDownloadAuthStrategyOrder(
-    options,
-    preferredLabel
-  )
-  options._youtubeAuthStrategyIndex = 0
-}
-
-function advanceYouTubeExtractorCandidate(options: DownloadOptions): boolean {
-  const currentIndex = options._youtubeExtractorIndex || 0
-  const candidates = options._youtubeExtractorCandidates || []
-  if (currentIndex >= candidates.length - 1) {
-    return false
-  }
-
-  options._youtubeExtractorIndex = currentIndex + 1
-  return true
 }
 
 function applyProxyArg(args: string[], proxyUrl?: string): void {
@@ -646,19 +248,29 @@ function getAppliedRateLimit(rateLimit: string, activeDownloadCount: number): st
 // ── Funções internas ──
 
 async function getYtdlpPath(): Promise<string> {
-  const preferredPath = await getPreferredYtdlpPath()
-  if (preferredPath) {
-    console.log('[getYtdlpPath] Using preferred path:', preferredPath)
-    return preferredPath
+  if (ytdlpPathCache) {
+    return ytdlpPathCache
   }
 
-  const status = await checkDep('yt-dlp')
-  console.log('[getYtdlpPath] checkDep status:', status)
-  if (!status.path) {
-    throw new Error('yt-dlp not installed')
+  if (!ytdlpPathInFlight) {
+    ytdlpPathInFlight = (async () => {
+      const status = await checkDep('yt-dlp')
+      if (!status.path) {
+        throw new Error('yt-dlp não encontrado. Instale o yt-dlp nas Configurações.')
+      }
+
+      ytdlpPathCache = status.path
+      logYtdlp('[getYtdlpPath] Using installed path', {
+        path: status.path,
+        version: status.version
+      })
+      return status.path
+    })().finally(() => {
+      ytdlpPathInFlight = null
+    })
   }
-  console.log('[getYtdlpPath] Using checked path:', status.path)
-  return status.path
+
+  return ytdlpPathInFlight
 }
 
 /**
@@ -689,16 +301,13 @@ export async function fetchQuickInfo(
   return new Promise((resolve) => {
     const args: string[] = []
 
-    applyCookiesArgs(
-      args,
-      !!cookies?.useCookies,
-      cookies?.cookieBrowser || 'chrome',
-      cookies?.cookiesFilePath
-    )
+    if (cookies?.useCookies) {
+      applyCookiesArgs(args, true, cookies.cookieBrowser || 'chrome', cookies.cookiesFilePath)
+    }
     applyProxyArg(args, cookies?.proxyUrl)
 
     if (isYouTubeUrl(url)) {
-      args.push('--extractor-args', 'youtube:player_client=default,-tv_simply')
+      args.push('--extractor-args', YOUTUBE_EXTRACTOR_ARGS)
     }
 
     args.push('--skip-download', '--no-playlist', '--print', '%(title)s\n%(thumbnail)s', url)
@@ -735,24 +344,14 @@ export async function listFormats(url: string, cookies?: CookieOptions): Promise
   const requestKey = buildFormatRequestKey(url, cookies)
   const existing = inFlightFormatRequests.get(requestKey)
   if (existing) {
-    console.log('[listFormats] Reusing in-flight request for URL:', url)
+    logYtdlp('[listFormats] Reusing in-flight request', { url })
     return existing
   }
 
   const task = (async () => {
     const ytdlpPath = await getYtdlpPath()
-    console.log('[listFormats] Queueing format probe for URL:', url, 'with ytdlp path:', ytdlpPath)
-
-    // Timeout global para toda a operação (evita bloqueios infinitos)
-    const globalTimeout = setTimeout(() => {
-      console.error('[listFormats] GLOBAL TIMEOUT: listFormats exceeded max time')
-    }, FORMAT_PROBE_TIMEOUT_MS * 5)
-
-    try {
-      return await enqueueFormatProbe(url, cookies, ytdlpPath)
-    } finally {
-      clearTimeout(globalTimeout)
-    }
+    logYtdlp('[listFormats] Queueing format probe', { url, ytdlpPath })
+    return enqueueFormatProbe(() => listFormatsImpl(url, cookies, ytdlpPath))
   })()
 
   inFlightFormatRequests.set(requestKey, task)
@@ -768,353 +367,201 @@ async function listFormatsImpl(
   cookies: CookieOptions | undefined,
   ytdlpPath: string
 ): Promise<VideoInfo> {
-  const requestKey = buildFormatRequestKey(url, cookies)
-  const preferredAttempt = getPreferredYouTubeAttempt(requestKey)
+  const isYT = isYouTubeUrl(url)
+  const startedAt = Date.now()
 
-  const runSingleProbe = async (extractorArgs: string, authArgs: string[]): Promise<VideoInfo> => {
-    return new Promise((resolve, reject) => {
-      const args: string[] = [...authArgs]
+  return new Promise((resolve, reject) => {
+    const args: string[] = []
+    let settled = false
+    let timeout: ReturnType<typeof setTimeout> | null = null
+    let timedOut = false
 
-      applyProxyArg(args, cookies?.proxyUrl)
-
-      if (isYouTubeUrl(url) && extractorArgs) {
-        args.push('--extractor-args', extractorArgs)
-      }
-
-      // Evita travas longas de rede durante a sondagem de formatos.
-      args.push('--socket-timeout', '12', '--retries', '1')
-      args.push('-j', '--no-playlist', url)
-
-      console.log('[listFormats] Running yt-dlp with args:', JSON.stringify(args))
-      const childProcess = spawn(ytdlpPath, args)
-
-      const timeout = setTimeout(() => {
-        console.error(
-          '[listFormats] Process timeout after',
-          FORMAT_PROBE_TIMEOUT_MS,
-          'ms - killing process'
-        )
-        childProcess.kill('SIGKILL')
-        fail(new Error(`yt-dlp probe timed out after ${FORMAT_PROBE_TIMEOUT_MS}ms`))
-      }, FORMAT_PROBE_TIMEOUT_MS)
-
-      let stdoutBuffer = ''
-      let stderrBuffer = ''
-      let hasStartedReceivingData = false
-      let settled = false
-
-      const fail = (error: Error): void => {
-        if (settled) {
-          return
-        }
-        settled = true
-        clearTimeout(timeout)
-        reject(error)
-      }
-
-      const succeed = (info: VideoInfo): void => {
-        if (settled) {
-          return
-        }
-        settled = true
-        clearTimeout(timeout)
-        resolve(info)
-      }
-
-      childProcess.stdout.on('data', (chunk) => {
-        if (!hasStartedReceivingData) {
-          console.log('[listFormats] Started receiving stdout data')
-          hasStartedReceivingData = true
-        }
-        stdoutBuffer += chunk.toString()
-      })
-
-      childProcess.stderr.on('data', (chunk) => {
-        const stderrText = chunk.toString()
-        stderrBuffer += stderrText
-        console.log('[listFormats] stderr:', stderrText)
-
-        // Falha rapida: o YouTube ja confirmou bloqueio de bot/login.
-        if (shouldRetryWithCookies(stderrBuffer)) {
-          console.warn('[listFormats] Fast-fail triggered due to bot/login challenge')
-          childProcess.kill('SIGKILL')
-          fail(new Error(stderrBuffer || 'YouTube requires authentication'))
-        }
-      })
-
-      childProcess.on('close', (exitCode) => {
-        if (settled) {
-          return
-        }
-
-        clearTimeout(timeout)
-        console.log(
-          '[listFormats] Process closed with exit code:',
-          exitCode,
-          'stdout length:',
-          stdoutBuffer.length
-        )
-
-        if (exitCode !== 0) {
-          console.error('[listFormats] yt-dlp exited with code:', exitCode, 'stderr:', stderrBuffer)
-          fail(new Error(stderrBuffer || `yt-dlp exited with code ${exitCode}`))
-          return
-        }
-
-        try {
-          const rawData = JSON.parse(stdoutBuffer)
-
-          const videoInfo: VideoInfo = {
-            id: rawData.id,
-            title: rawData.title || 'Unknown',
-            thumbnail: rawData.thumbnail || '',
-            duration: rawData.duration || 0,
-            url,
-            formats: (rawData.formats || []).map(
-              (f: Record<string, unknown>): FormatInfo => ({
-                format_id: String(f.format_id || ''),
-                ext: String(f.ext || ''),
-                resolution: String(f.resolution || 'audio only'),
-                height: (f.height as number) || null,
-                fps: (f.fps as number) || null,
-                filesize: (f.filesize as number) || null,
-                filesize_approx: (f.filesize_approx as number) || null,
-                vcodec: String(f.vcodec || 'none'),
-                acodec: String(f.acodec || 'none'),
-                tbr: (f.tbr as number) || null,
-                format_note: String(f.format_note || '')
-              })
-            )
-          }
-
-          console.log('[listFormats] Successfully parsed', videoInfo.formats.length, 'formats')
-          succeed(videoInfo)
-        } catch (parseError) {
-          console.error(
-            '[listFormats] Failed to parse JSON:',
-            parseError,
-            'stdout length:',
-            stdoutBuffer.length,
-            'stdout:',
-            stdoutBuffer.substring(0, 200)
-          )
-          fail(new Error(`Failed to parse yt-dlp output: ${parseError}`))
-        }
-      })
-
-      childProcess.on('error', (err) => {
-        console.error('[listFormats] childProcess error:', err)
-        fail(err instanceof Error ? err : new Error(String(err)))
-      })
-    })
-  }
-
-  const runWithCookies = async (
-    useAuth: boolean,
-    extractorArgs = ''
-  ): Promise<{ info: VideoInfo; authStrategyLabel: AuthStrategyLabel }> => {
-    if (!(useAuth && cookies?.useCookies)) {
-      const info = await runSingleProbe(extractorArgs, [])
-      return { info, authStrategyLabel: 'none' }
-    }
-
-    const preferredAuthLabel =
-      preferredAttempt?.authStrategyLabel && preferredAttempt.authStrategyLabel !== 'none'
-        ? preferredAttempt.authStrategyLabel
-        : 'cookies-browser'
-
-    const strategies = buildCookieAuthStrategies(
-      cookies.cookieBrowser,
-      cookies.cookiesFilePath,
-      preferredAuthLabel
-    )
-    if (strategies.length === 0) {
-      const info = await runSingleProbe(extractorArgs, [])
-      return { info, authStrategyLabel: 'none' }
-    }
-
-    let lastError: Error | null = null
-    for (let i = 0; i < strategies.length; i++) {
-      const strategy = strategies[i]
-      try {
-        console.log('[listFormats] Auth strategy:', strategy.label)
-        const info = await runSingleProbe(extractorArgs, strategy.args)
-        return { info, authStrategyLabel: strategy.label }
-      } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err))
-        lastError = error
-
-        const hasNextStrategy = i < strategies.length - 1
-        if (hasNextStrategy && shouldRetryWithCookies(error.message)) {
-          console.warn(
-            '[listFormats] Auth challenge with strategy',
-            strategy.label,
-            '- trying next strategy'
-          )
-          continue
-        }
-
-        throw error
-      }
-    }
-
-    throw lastError || new Error('Failed to list formats with all auth strategies')
-  }
-
-  if (!isYouTubeUrl(url)) {
-    console.log('[listFormats] Non-YouTube URL, running simple probe')
-    return (await runWithCookies(!!cookies?.useCookies)).info
-  }
-
-  const results: VideoInfo[] = []
-  let lastError: unknown = null
-  let consecutiveTimeouts = 0 // Rastreia timeouts consecutivos
-  let authChallengeDetected = false
-
-  const extractorCandidates = await resolveYouTubeExtractorArgsCandidates(url)
-  const orderedCandidates = prioritizeYouTubeExtractorCandidates(
-    extractorCandidates.length > 0 ? extractorCandidates : [buildYouTubeExtractorArgs('default')],
-    preferredAttempt?.extractorArgs
-  )
-
-  console.log(
-    '[listFormats] YouTube URL detected. Trying',
-    orderedCandidates.length,
-    'extractor candidates'
-  )
-  if (preferredAttempt) {
-    console.log('[listFormats] Prioritizing remembered YouTube attempt:', preferredAttempt)
-  }
-
-  const attempt = async (index: number, useAuth: boolean, extractorArgs: string): Promise<void> => {
-    const startTime = Date.now()
-    try {
-      console.log(
-        '[listFormats] Candidate',
-        index + 1,
-        '/',
-        orderedCandidates.length,
-        '- Attempting with useAuth:',
-        useAuth,
-        'extractorArgs:',
-        extractorArgs
-      )
-      const { info, authStrategyLabel } = await runWithCookies(useAuth, extractorArgs)
-      const duration = Date.now() - startTime
-      results.push(info)
-      consecutiveTimeouts = 0 // Reset timeout counter on success
-      rememberSuccessfulYouTubeAttempt(requestKey, extractorArgs, authStrategyLabel)
-      console.log(
-        '[listFormats] Candidate',
-        index + 1,
-        'succeeded in',
-        duration,
-        'ms - got',
-        info.formats.length,
-        'formats, max height:',
-        getMaxHeight(info.formats),
-        'auth strategy:',
-        authStrategyLabel
-      )
-    } catch (err) {
-      const duration = Date.now() - startTime
-      console.error('[listFormats] Candidate', index + 1, 'failed after', duration, 'ms:', err)
-      if (err instanceof Error && shouldRetryWithCookies(err.message)) {
-        authChallengeDetected = true
-      }
-      // Se foi timeout, incrementa contador
-      if (err instanceof Error && err.message.includes('timed out')) {
-        consecutiveTimeouts++
-        console.warn('[listFormats] Timeout detected - consecutive timeouts:', consecutiveTimeouts)
+    // Em YouTube, prioriza cookies do navegador para evitar arquivo Netscape desatualizado.
+    if (cookies?.useCookies) {
+      if (isYT) {
+        args.push('--cookies-from-browser', cookies.cookieBrowser || 'chrome')
       } else {
-        consecutiveTimeouts = 0
-      }
-      lastError = err
-    }
-  }
-
-  // No comportamento atual do YouTube, tentativas anônimas costumam falhar com bot checks e atrasar a UI.
-  // Por isso, tenta primeiro o caminho autenticado quando os cookies estão habilitados.
-  if (cookies?.useCookies) {
-    console.log('[listFormats] Cookies enabled, trying authenticated attempts first')
-    for (let i = 0; i < orderedCandidates.length; i++) {
-      if (authChallengeDetected) {
-        console.log(
-          '[listFormats] Auth challenge already detected, skipping remaining authenticated attempts'
-        )
-        break
-      }
-      // Se temos 2+ timeouts consecutivos, pula para anônimo
-      if (consecutiveTimeouts >= 2) {
-        console.log(
-          '[listFormats] Too many consecutive timeouts (' +
-            consecutiveTimeouts +
-            '), skipping to anonymous attempts'
-        )
-        break
-      }
-      await attempt(i, true, orderedCandidates[i])
-
-      const latest = results[results.length - 1]
-      if (latest && getMaxHeight(latest.formats) > 1080) {
-        console.log('[listFormats] Got 4K+ formats with cookies, returning early')
-        return latest
+        applyCookiesArgs(args, true, cookies.cookieBrowser || 'chrome', cookies.cookiesFilePath)
       }
     }
-  }
+    applyProxyArg(args, cookies?.proxyUrl)
 
-  // Fallbacks anônimos ainda são úteis quando os próprios cookies restringem codecs ou formatos.
-  console.log('[listFormats] Trying anonymous attempts')
-  for (let i = 0; i < orderedCandidates.length; i++) {
-    if (authChallengeDetected) {
-      console.log('[listFormats] Auth challenge detected, skipping remaining anonymous attempts')
-      break
+    // YouTube: usa extractor args que funcionam e pegam 4K
+    if (isYT) {
+      args.push('--extractor-args', YOUTUBE_EXTRACTOR_ARGS)
     }
-    // Se temos 2+ timeouts consecutivos em anônimo, salta
-    if (consecutiveTimeouts >= 2) {
-      console.log(
-        '[listFormats] Too many consecutive timeouts (' +
-          consecutiveTimeouts +
-          '), skipping further attempts'
-      )
-      break
+
+    // -j funciona melhor com nightly para retornar formatos 2K/4K no YouTube.
+    args.push('-j', '--no-playlist', '--no-warnings')
+    args.push(url)
+
+    logYtdlp('[listFormatsImpl] Running yt-dlp', {
+      url,
+      isYT,
+      timeoutMs: FORMAT_PROBE_TIMEOUT_MS,
+      args
+    })
+
+    const childProcess = spawn(ytdlpPath, args)
+
+    const rejectOnce = (error: Error): void => {
+      if (settled) {
+        return
+      }
+      settled = true
+      if (timeout) {
+        clearTimeout(timeout)
+      }
+      reject(error)
     }
-    await attempt(i, false, orderedCandidates[i])
 
-    const latest = results[results.length - 1]
-    if (latest && getMaxHeight(latest.formats) > 1080) {
-      console.log('[listFormats] Got 4K+ formats anonymously, returning early')
-      return latest
+    timeout = setTimeout(() => {
+      timedOut = true
+      logYtdlp('[listFormatsImpl] Timeout ao buscar formatos', {
+        url,
+        timeoutMs: FORMAT_PROBE_TIMEOUT_MS
+      })
+      childProcess.kill('SIGKILL')
+      rejectOnce(new Error(`Timeout ao buscar formatos (${FORMAT_PROBE_TIMEOUT_MS / 1000}s)`))
+    }, FORMAT_PROBE_TIMEOUT_MS)
+
+    let stdoutBuffer = ''
+    let stderrBuffer = ''
+
+    const tryResolveFromStdout = (origin: 'stream' | 'close'): boolean => {
+      if (settled || !stdoutBuffer.trim()) {
+        return false
+      }
+
+      const jsonPayload = extractJsonPayload(stdoutBuffer)
+      if (!jsonPayload) {
+        return false
+      }
+
+      try {
+        const rawData = JSON.parse(jsonPayload)
+
+        const videoInfo: VideoInfo = {
+          id: rawData.id,
+          title: rawData.title || 'Unknown',
+          thumbnail: rawData.thumbnail || '',
+          duration: rawData.duration || 0,
+          url,
+          formats: (rawData.formats || []).map(
+            (f: Record<string, unknown>): FormatInfo => ({
+              format_id: String(f.format_id || ''),
+              ext: String(f.ext || ''),
+              resolution: String(f.resolution || 'audio only'),
+              height: (f.height as number) || null,
+              fps: (f.fps as number) || null,
+              filesize: (f.filesize as number) || null,
+              filesize_approx: (f.filesize_approx as number) || null,
+              vcodec: String(f.vcodec || 'none'),
+              acodec: String(f.acodec || 'none'),
+              tbr: (f.tbr as number) || null,
+              format_note: String(f.format_note || '')
+            })
+          )
+        }
+
+        if (!videoInfo.formats.length) {
+          return false
+        }
+
+        settled = true
+        if (timeout) {
+          clearTimeout(timeout)
+        }
+
+        logYtdlp('[listFormatsImpl] Parsed formats', {
+          url,
+          origin,
+          formats: videoInfo.formats.length,
+          maxHeight: Math.max(
+            ...videoInfo.formats.map((f) => (typeof f.height === 'number' ? f.height : 0))
+          )
+        })
+
+        resolve(videoInfo)
+
+        // Alguns binarios ficam presos apos imprimir JSON; encerra sem bloquear UI.
+        try {
+          childProcess.kill('SIGTERM')
+        } catch {
+          // ignore
+        }
+
+        return true
+      } catch {
+        return false
+      }
     }
-  }
 
-  // Se nenhum candidato funcionar, faz uma última tentativa com argumentos mínimos.
-  if (results.length === 0) {
-    console.log(
-      '[listFormats] All extractor candidates failed. Trying final fallback with no extractor args'
-    )
-    try {
-      const { info: fallbackInfo } = await runWithCookies(false, '')
-      results.push(fallbackInfo)
-      console.log(
-        '[listFormats] Fallback attempt succeeded with',
-        fallbackInfo.formats.length,
-        'formats'
-      )
-    } catch (err) {
-      console.error('[listFormats] Fallback attempt also failed:', err)
-    }
-  }
+    childProcess.stdout.on('data', (chunk) => {
+      stdoutBuffer += chunk.toString()
 
-  if (results.length === 0) {
-    console.error('[listFormats] All attempts failed. Last error:', lastError)
-    throw lastError instanceof Error
-      ? lastError
-      : new Error(String(lastError || 'Failed to list formats'))
-  }
+      // Tenta finalizar cedo quando o JSON ja chegou completo.
+      if (stdoutBuffer.trimEnd().endsWith('}')) {
+        tryResolveFromStdout('stream')
+      }
+    })
 
-  console.log('[listFormats] Choosing best from', results.length, 'successful probes')
-  return chooseBestVideoInfo(results)
+    childProcess.stderr.on('data', (chunk) => {
+      const text = chunk.toString()
+      stderrBuffer += text
+    })
+
+    childProcess.on('close', (exitCode, signal) => {
+      if (settled) {
+        return
+      }
+
+      if (timeout) {
+        clearTimeout(timeout)
+      }
+
+      const hasNonZeroExit = typeof exitCode === 'number' && exitCode !== 0
+
+      logYtdlp('[listFormatsImpl] Process finished', {
+        url,
+        exitCode,
+        signal,
+        durationMs: Date.now() - startedAt,
+        stdoutBytes: stdoutBuffer.length,
+        stderrBytes: stderrBuffer.length,
+        timedOut
+      })
+
+      if (!timedOut && signal) {
+        rejectOnce(new Error(`yt-dlp interrompido por sinal: ${signal}`))
+        return
+      }
+
+      if (hasNonZeroExit) {
+        const stderrMessage = stderrBuffer.trim()
+        const message = stderrMessage || `yt-dlp exited with code ${exitCode}`
+        rejectOnce(new Error(message))
+        return
+      }
+
+      if (!stdoutBuffer.trim()) {
+        const stderrMessage = stderrBuffer.trim()
+        rejectOnce(new Error(stderrMessage || 'yt-dlp não retornou dados de formatos.'))
+        return
+      }
+
+      if (tryResolveFromStdout('close')) {
+        return
+      }
+
+      rejectOnce(new Error(stderrBuffer.trim() || 'Saída JSON vazia ou inválida'))
+    })
+
+    childProcess.on('error', (err) => {
+      logYtdlp('[listFormatsImpl] Spawn error', { url, error: err.message })
+      rejectOnce(err)
+    })
+  })
 }
 
 // ── Fila de downloads ──
@@ -1173,48 +620,16 @@ async function executeDownload(
   const ytdlpPath = await getYtdlpPath()
   const args: string[] = []
   const youtubeUrl = isYouTubeUrl(options.url)
-  const requestKey = buildDownloadRequestKey(options)
-  const preferredYouTubeAttempt = youtubeUrl ? getPreferredYouTubeAttempt(requestKey) : null
-  let currentYouTubeAuthLabel: AuthStrategyLabel = 'none'
 
   applyProxyArg(args, options.proxyUrl)
 
+  // YouTube: usa extractor args que funcionam SEM cookies
   if (youtubeUrl) {
-    if (!options._youtubeExtractorCandidates || options._youtubeExtractorCandidates.length === 0) {
-      options._youtubeExtractorCandidates = await resolveYouTubeExtractorArgsCandidates(options.url)
-    }
-
-    options._youtubeExtractorCandidates = prioritizeYouTubeExtractorCandidates(
-      options._youtubeExtractorCandidates,
-      preferredYouTubeAttempt?.extractorArgs
-    )
-    if (typeof options._youtubeExtractorIndex !== 'number' || options._youtubeExtractorIndex < 0) {
-      options._youtubeExtractorIndex = 0
-    }
-
-    options._youtubeExtractorArgs =
-      options._youtubeExtractorCandidates[options._youtubeExtractorIndex || 0] || ''
-    if (options._youtubeExtractorArgs) {
-      args.push('--extractor-args', options._youtubeExtractorArgs)
-    }
-
-    if (!options._youtubeAuthStrategyLabels || options._youtubeAuthStrategyLabels.length === 0) {
-      resetYouTubeAuthStrategyOrder(options, preferredYouTubeAttempt?.authStrategyLabel)
-    } else if (
-      typeof options._youtubeAuthStrategyIndex !== 'number' ||
-      options._youtubeAuthStrategyIndex < 0
-    ) {
-      options._youtubeAuthStrategyIndex = 0
-    }
-
-    currentYouTubeAuthLabel =
-      options._youtubeAuthStrategyLabels?.[options._youtubeAuthStrategyIndex || 0] || 'none'
+    args.push('--extractor-args', YOUTUBE_EXTRACTOR_ARGS)
   }
 
   const format = options.formatId || 'bestvideo+bestaudio'
-  const cookiesEnabledThisAttempt = youtubeUrl
-    ? currentYouTubeAuthLabel !== 'none'
-    : shouldUseCookiesForAttempt(options)
+  const cookiesEnabledThisAttempt = shouldUseCookiesForAttempt(options)
   const normalizedRateLimit = normalizeRateLimit(options.rateLimit)
 
   if (normalizedRateLimit === null) {
@@ -1240,16 +655,13 @@ async function executeDownload(
     }
   }
 
-  // Cookies
-  if (youtubeUrl) {
-    applyCookieStrategyArgs(
-      args,
-      currentYouTubeAuthLabel,
-      options.cookieBrowser,
-      options.cookiesFilePath
-    )
-  } else if (cookiesEnabledThisAttempt) {
-    applyCookiesArgs(args, true, options.cookieBrowser, options.cookiesFilePath)
+  // Cookies (opcional, extractor-args já resolve)
+  if (cookiesEnabledThisAttempt) {
+    if (youtubeUrl) {
+      args.push('--cookies-from-browser', options.cookieBrowser || 'chrome')
+    } else {
+      applyCookiesArgs(args, true, options.cookieBrowser || 'chrome', options.cookiesFilePath)
+    }
   }
 
   // Formato
@@ -1290,19 +702,13 @@ async function executeDownload(
 
   args.push(options.url)
 
-  console.log('[download] Starting attempt', {
+  console.log('[download] Starting', {
     id: options.id,
     retryCount,
     format,
-    extractorArgs: options._youtubeExtractorArgs || '',
-    authStrategy: currentYouTubeAuthLabel,
-    cookiesEnabledThisAttempt,
-    configuredRateLimit: normalizedRateLimit,
-    appliedRateLimit,
-    activeDownloadCount: runningCount,
-    outputDir: options.outputDir
+    cookies: cookiesEnabledThisAttempt,
+    rateLimit: appliedRateLimit
   })
-  console.log('[download] Running yt-dlp with args:', JSON.stringify(args))
 
   // Emite stage: analisando
   mainWindow.webContents.send('download:stage', {
@@ -1405,14 +811,6 @@ async function executeDownload(
     }
 
     if (exitCode === 0) {
-      if (youtubeUrl && options._youtubeExtractorArgs) {
-        rememberSuccessfulYouTubeAttempt(
-          requestKey,
-          options._youtubeExtractorArgs,
-          currentYouTubeAuthLabel
-        )
-      }
-
       // Sucesso
       mainWindow.webContents.send('download:stage', {
         id: options.id,
@@ -1427,90 +825,16 @@ async function executeDownload(
       })
       notification.show()
     } else {
-      // Falha — tenta auto-retry (máx 3 tentativas)
-      const maxRetries = 3
+      // Falha — retry simples (máx 2 tentativas)
+      const maxRetries = 2
 
       if (retryCount < maxRetries) {
         const nextRetry = retryCount + 1
 
-        // Na segunda falha (retryCount >= 1), limpa arquivos parciais
+        // Na segunda falha, limpa arquivos parciais e tenta sem cookies
         if (nextRetry >= 2) {
           cleanPartialFiles(options.outputDir)
-        }
-
-        // Se o YouTube bloqueou formato 4K/DASH por causa de cookies (SABR), log de erro avisa.
-        // O próximo retry deve tentar remover os cookies!
-        if (
-          options.useCookies &&
-          youtubeUrl &&
-          !cookiesEnabledThisAttempt &&
-          !options._forceCookiesForRetry &&
-          shouldRetryWithCookies(stderrAccum)
-        ) {
-          options._forceCookiesForRetry = true
-          options._dropCookiesForRetry = false
-        }
-
-        if (
-          options.useCookies &&
-          cookiesEnabledThisAttempt &&
-          !options._dropCookiesForRetry &&
-          shouldDropCookiesForFormatRestriction(stderrAccum)
-        ) {
           options._dropCookiesForRetry = true
-          options._forceCookiesForRetry = false
-        }
-
-        if (youtubeUrl) {
-          const hasAuthChallenge = shouldRetryWithCookies(stderrAccum)
-          const hasFormatRestriction = shouldDropCookiesForFormatRestriction(stderrAccum)
-          let retryPlanUpdated = false
-
-          if (hasAuthChallenge) {
-            retryPlanUpdated = advanceYouTubeAuthStrategy(options)
-
-            if (!retryPlanUpdated && advanceYouTubeExtractorCandidate(options)) {
-              resetYouTubeAuthStrategyOrder(options, preferredYouTubeAttempt?.authStrategyLabel)
-              retryPlanUpdated = true
-            }
-          } else if (hasFormatRestriction) {
-            const anonymousIndex = options._youtubeAuthStrategyLabels?.indexOf('none') ?? -1
-            const currentAuthIndex = options._youtubeAuthStrategyIndex || 0
-
-            if (
-              currentYouTubeAuthLabel !== 'none' &&
-              anonymousIndex >= 0 &&
-              anonymousIndex !== currentAuthIndex
-            ) {
-              options._youtubeAuthStrategyIndex = anonymousIndex
-              retryPlanUpdated = true
-            }
-
-            if (!retryPlanUpdated && advanceYouTubeExtractorCandidate(options)) {
-              resetYouTubeAuthStrategyOrder(options, 'none')
-              retryPlanUpdated = true
-            }
-          } else {
-            if (advanceYouTubeExtractorCandidate(options)) {
-              resetYouTubeAuthStrategyOrder(options, preferredYouTubeAttempt?.authStrategyLabel)
-              retryPlanUpdated = true
-            } else if (advanceYouTubeAuthStrategy(options)) {
-              retryPlanUpdated = true
-            }
-          }
-
-          console.log('[download] Retry decision', {
-            id: options.id,
-            nextRetry,
-            hasAuthChallenge,
-            hasFormatRestriction,
-            retryPlanUpdated,
-            nextExtractorIndex: options._youtubeExtractorIndex || 0,
-            nextExtractorArgs:
-              options._youtubeExtractorCandidates?.[options._youtubeExtractorIndex || 0] || '',
-            nextAuthStrategy:
-              options._youtubeAuthStrategyLabels?.[options._youtubeAuthStrategyIndex || 0] || 'none'
-          })
         }
 
         // Re-enfileira com retry

@@ -192,17 +192,27 @@ const emit = defineEmits<{
 }>()
 
 const visible = ref(true)
-const loading = ref(true)
+const loading = ref(false)
 const errorMsg = ref('')
 const videoTitle = ref('')
 const videoDuration = ref(0)
 const formats = ref<FormatInfo[]>([])
 const selectedFormat = ref<FormatInfo | null>(null)
 const mergeWithBestAudio = ref(true)
-const FORMAT_DIALOG_SOFT_TIMEOUT_MS = 45000
-const FORMAT_DIALOG_HARD_TIMEOUT_MS = 120000
+const FORMAT_DIALOG_SOFT_TIMEOUT_MS = 15000
 const timeoutWarning = ref('')
 let activeRequestId = 0
+
+function normalizeFormatErrorMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error)
+  const message = raw.replace(/^Failed to fetch formats:\s*/i, '').trim()
+
+  if (message.toLowerCase().includes('timeout')) {
+    return 'Timeout ao buscar formatos. Verifique conexão, cookies e proxy.'
+  }
+
+  return message || 'Falha ao buscar formatos.'
+}
 
 const resolvedFormatId = computed(() => {
   if (!selectedFormat.value) {
@@ -364,8 +374,6 @@ async function loadFormats(): Promise<void> {
   timeoutWarning.value = ''
 
   let softTimeout: ReturnType<typeof setTimeout> | null = null
-  let hardTimeout: ReturnType<typeof setTimeout> | null = null
-
   try {
     const cached = getCachedFormats(props.url)
     if (cached) {
@@ -391,21 +399,10 @@ async function loadFormats(): Promise<void> {
       if (requestId !== activeRequestId || !loading.value) {
         return
       }
-      timeoutWarning.value = 'Ainda carregando formatos... YouTube pode estar validando cookies.'
+      timeoutWarning.value = 'Ainda buscando formatos...'
     }, FORMAT_DIALOG_SOFT_TIMEOUT_MS)
 
-    const info = await Promise.race([
-      ensureFormats(props.url, cookieOptions),
-      new Promise<never>((_, reject) => {
-        hardTimeout = setTimeout(() => {
-          reject(
-            new Error(
-              'Tempo esgotado ao buscar formatos. Tente sem cookies ou ajuste o navegador de cookies.'
-            )
-          )
-        }, FORMAT_DIALOG_HARD_TIMEOUT_MS)
-      })
-    ])
+    const info = await ensureFormats(props.url, cookieOptions)
 
     if (requestId !== activeRequestId) {
       return
@@ -413,9 +410,7 @@ async function loadFormats(): Promise<void> {
 
     const processed = processFormats(info.formats as FormatInfo[])
     if (processed.length === 0) {
-      throw new Error(
-        'Nenhum formato disponivel para esta URL. O YouTube pode estar exigindo autenticacao.'
-      )
+      throw new Error('Nenhum formato disponível. Tente habilitar cookies nas configurações.')
     }
 
     videoTitle.value = info.title
@@ -426,13 +421,10 @@ async function loadFormats(): Promise<void> {
     if (requestId !== activeRequestId) {
       return
     }
-    errorMsg.value = err instanceof Error ? err.message : String(err)
+    errorMsg.value = normalizeFormatErrorMessage(err)
   } finally {
     if (softTimeout) {
       clearTimeout(softTimeout)
-    }
-    if (hardTimeout) {
-      clearTimeout(hardTimeout)
     }
     if (requestId === activeRequestId) {
       loading.value = false

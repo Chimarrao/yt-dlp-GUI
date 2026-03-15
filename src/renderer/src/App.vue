@@ -195,7 +195,7 @@ const {
   removeDownload,
   clearCompleted,
   setFormat,
-  ensureFormats,
+  getCachedFormats,
   setFormatAnalysisStatus,
   loadPersistedSettings,
   startAutoSave
@@ -217,10 +217,6 @@ const pendingCount = computed(
 
 const speedSeries = ref<number[]>([])
 const speedSamplingTimer = ref<ReturnType<typeof setInterval> | null>(null)
-const FORMAT_PREFETCH_DELAY_MS = 1500
-const formatPrefetchQueue = ref<DownloadItem[]>([])
-const queuedPrefetchUrls = new Set<string>()
-const runningFormatPrefetch = ref(false)
 
 const speedChartPath = computed(() => {
   const values = speedSeries.value
@@ -270,22 +266,17 @@ function startSpeedSampling(): void {
   }, 1000)
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
 async function ensureResolvedFormat(item: DownloadItem): Promise<void> {
   if (!isGenericFormatSelector(item.formatId)) {
     return
   }
 
   try {
-    const cached = await ensureFormats(item.url, {
-      useCookies: settings.useCookies,
-      cookieBrowser: settings.cookieBrowser,
-      cookiesFilePath: settings.cookiesFilePath,
-      proxyUrl: settings.proxyUrl
-    })
+    // Nao dispara nova analise aqui para evitar travar o inicio do download.
+    const cached = getCachedFormats(item.url)
+    if (!cached) {
+      return
+    }
 
     const resolved = resolveRequestedFormatSelection(
       cached.formats as SelectableFormat[],
@@ -298,54 +289,6 @@ async function ensureResolvedFormat(item: DownloadItem): Promise<void> {
   } catch {
     // Mantém o formato genérico atual se a análise falhar.
   }
-}
-
-async function runFormatPrefetchQueue(): Promise<void> {
-  if (runningFormatPrefetch.value) {
-    return
-  }
-
-  runningFormatPrefetch.value = true
-  try {
-    while (formatPrefetchQueue.value.length > 0) {
-      const item = formatPrefetchQueue.value.shift()
-      if (!item) {
-        continue
-      }
-
-      queuedPrefetchUrls.delete(item.url)
-      setFormatAnalysisStatus(item.url, 'loading')
-
-      try {
-        await ensureFormats(item.url, {
-          useCookies: settings.useCookies,
-          cookieBrowser: settings.cookieBrowser,
-          cookiesFilePath: settings.cookiesFilePath,
-          proxyUrl: settings.proxyUrl
-        })
-        await ensureResolvedFormat(item)
-      } catch {
-        // Erro no pré-carregamento não bloqueia a fila; o diálogo ainda permite retry manual.
-      }
-
-      if (formatPrefetchQueue.value.length > 0) {
-        await sleep(FORMAT_PREFETCH_DELAY_MS)
-      }
-    }
-  } finally {
-    runningFormatPrefetch.value = false
-  }
-}
-
-function enqueueFormatPrefetch(item: DownloadItem): void {
-  if (queuedPrefetchUrls.has(item.url)) {
-    return
-  }
-
-  queuedPrefetchUrls.add(item.url)
-  setFormatAnalysisStatus(item.url, 'queued')
-  formatPrefetchQueue.value.push(item)
-  runFormatPrefetchQueue()
 }
 
 // ── Pré-carregamento ──
@@ -397,7 +340,7 @@ function handleAddUrls(urls: string[]): void {
 
     for (const item of added) {
       prefetchVideoInfo(item)
-      enqueueFormatPrefetch(item)
+      setFormatAnalysisStatus(item.url, 'idle')
     }
   }
 }
@@ -578,7 +521,7 @@ onMounted(async () => {
 
       for (const item of added) {
         prefetchVideoInfo(item)
-        enqueueFormatPrefetch(item)
+        setFormatAnalysisStatus(item.url, 'idle')
       }
     }
   })

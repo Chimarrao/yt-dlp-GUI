@@ -111,11 +111,7 @@ app.whenReady().then(() => {
     try {
       console.log('[ipcMain] ytdlp:list-formats called for URL:', url)
       const result = await listFormats(url, cookies)
-      console.log(
-        '[ipcMain] ytdlp:list-formats succeeded, got',
-        result.formats?.length || 0,
-        'formats'
-      )
+      console.log('[ipcMain] ytdlp:list-formats succeeded, got', result.formats?.length || 0, 'formats')
       return result
     } catch (err) {
       console.error('[ipcMain] ytdlp:list-formats failed:', err)
